@@ -11,7 +11,7 @@ use File::Slurp;
 use lib 'lib';
 use FileLocator;
 use QBittorrent;
-use TorrentParser;==
+use TorrentParser;
 use ZombieManager;
 
 # use Logger;
