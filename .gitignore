@@ -116,6 +116,7 @@ perl-stacktrace.txt
 *.xz
 *.7z
 *.rar
+.zips/
 
 # -------------------------------------------------
 # Editor / IDE directories

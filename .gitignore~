@@ -130,6 +130,7 @@ perl-stacktrace.txt
 .settings/
 .metadata/
 nbproject/
+*~
 
 # -------------------------------------------------
 # Version control metadata
