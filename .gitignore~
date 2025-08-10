@@ -149,7 +149,7 @@ export_dir/
 export_dir_fin/
 *.torrent
 *.magnet
-
+*.json
 # -------------------------------------------------
 # macOS-specific extended attributes
 # -------------------------------------------------
