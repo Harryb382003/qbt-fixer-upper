@@ -7,6 +7,7 @@ use File::Spec;
 use POSIX qw(strftime);
 use JSON;
 use File::Slurp;
+use Data::Dumper;
 
 use lib 'lib';
 use FileLocator;
@@ -120,7 +121,7 @@ my $zombies;
 if ($opts{scan_zombies})
 {
   Logger::info("[INFO] Performing full zombie scan...");
-  $zombies = ZombieManager::scan_full($qb);
+  $zombies = $zm->scan_full();
   ZombieManager::write_cache($zombies) if $zombies;
 }
 else

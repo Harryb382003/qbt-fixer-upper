@@ -19,7 +19,7 @@ sub new {
     return $self;
 }
 
-sub detect_zombies_scan {
+sub scan_full {
     my ($self) = @_;
     my $qb = $self->{qb};
     my %zombies;
@@ -47,7 +47,7 @@ sub detect_zombies_scan {
     return \%zombies;
 }
 
-sub write_zombie_cache {
+sub write_cache {
     my ($self, $zombies) = @_;
     return unless $zombies && ref $zombies eq 'HASH';
 
