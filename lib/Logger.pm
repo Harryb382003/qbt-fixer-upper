@@ -37,7 +37,6 @@ my %active_colors;
 
 sub init {
 	Logger::debug("#	init");
-    my ($options) = @_;
      my ($opts) = @_;
     $Logger::opts = $opts;
 

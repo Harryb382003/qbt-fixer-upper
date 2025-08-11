@@ -1,13 +1,18 @@
 package ZombieManager;
-use strict;
-use warnings;
+
+use common::Sense;
 use File::Path qw(make_path);
 use File::Spec;
 use File::Slurp;
 use JSON;
 use POSIX qw(strftime);
+use lib 'lib';
 use Logger;
+use Exporter 'import';
 
+our @EXPORT_OK = qw(
+	write_cache
+	);
 sub new {
     my ($class, %args) = @_;
     my $self = {
@@ -44,23 +49,30 @@ sub scan_full {
     print "\r" . (' ' x 50) . "\r"; # Clear spinner line
 
     Logger::info("[SUMMARY] Zombie torrents in qBittorrent: " . scalar keys %zombies);
+    write_cache(\%zombies);
     return \%zombies;
 }
 
 sub write_cache {
-    my ($self, $zombies) = @_;
+    my ($zombies, $label) = @_;
     return unless $zombies && ref $zombies eq 'HASH';
 
     my $dir = "cache";
     make_path($dir) unless -d $dir;
 
-    unlink glob("$dir/zombies_cache_*.json");
-
     my $ts = strftime("%y.%m.%d-%H%M", localtime);
-    my $file = File::Spec->catfile($dir, "zombies_cache_${ts}.json");
-    write_file($file, JSON->new->utf8->pretty->encode($zombies));
+    my $suffix = $label ? "_$label" : "";
+    my $file = File::Spec->catfile($dir, "zombies_cache${suffix}_${ts}.json");
 
+    # Write the new cache first
+    write_file($file, JSON->new->utf8->pretty->encode($zombies));
     Logger::info("[INFO] Zombie cache written to $file (" . scalar(keys %$zombies) . " entries)");
+
+    # Now remove all older caches of this type
+    my $pattern = $label ? "$dir/zombies_cache_${label}_*.json" : "$dir/zombies_cache_*.json";
+    my @old_files = grep { $_ ne $file } glob($pattern);
+    unlink @old_files if @old_files;
+
     return $file;
 }
 
@@ -173,5 +185,47 @@ sub classify_zombies_by_infohash_name {
         next_filter => \%next_filter
     };
 }
+
+
+sub match_by_date {
+    my ($self, $extracted_ref, $wiggle_minutes) = @_;
+    $wiggle_minutes ||= 10;
+
+    return unless $extracted_ref && ref $extracted_ref eq 'ARRAY';
+    return unless $self->{zombies} && ref $self->{zombies} eq 'HASH';
+
+    my %extracted = map { $_->{hash} => $_ } @$extracted_ref;
+
+    foreach my $hash (keys %{$self->{zombies}}) {
+        my $zombie = $self->{zombies}{$hash};
+
+        # Skip if no added_on
+        unless (exists $zombie->{added_on} && defined $zombie->{added_on}) {
+            $zombie->{match_by_date} = 0;
+            next;
+        }
+
+        my $added_on_ts = $zombie->{added_on};
+        if (exists $extracted{$hash} && defined $extracted{$hash}{mtime}) {
+            my $mtime = $extracted{$hash}{mtime};
+            my $diff  = abs($mtime - $added_on_ts);
+
+            # Wiggle in seconds
+            if ($diff <= ($wiggle_minutes * 60)) {
+                $zombie->{match_by_date} = 1;
+            } else {
+                $zombie->{match_by_date} = 0;
+            }
+        } else {
+            $zombie->{match_by_date} = 0;
+        }
+    }
+
+    # No explicit return — modifies $self->{zombies} in place
+    return;
+}
+
+
+
 
 1;

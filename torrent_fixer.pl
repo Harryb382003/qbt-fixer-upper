@@ -14,16 +14,9 @@ use FileLocator;
 use QBittorrent;
 use TorrentParser;
 use ZombieManager;
-
-# use Logger;
-# use DedupeEngine;
-# use Chunk qw(apply_chunking);
-# use Sieve qw(filter_by_export_dirs filter_loaded_infohashes);
-# use DevTools qw(
-#     dev_compare_qbt_vs_exports_detailed
-#     verify_reference_infohashes
-# );
-# use Utils qw(start_timer stop_timer extract_used_cli_opts);
+use Utils;
+use Logger;
+use DevTools;
 
 # --- Usage ---
 sub usage {
@@ -39,20 +32,9 @@ Options:
   --verbose, -v         Increase verbosity
   --log-dir=<path>      Output path for logs
   --scan-zombies, -z    search for zombie torrents in qbt
-
+  --wiggle=i            Time wiggle in minutes for date matching
   --help, -h            Show help
 EOF
-
-  #  --allow-fallback      Allow File::Find (slow resource hog)
-  #   --backup, -b          Create backups
-  #   --report-orphans      Report orphan torrents
-  #   --clean-orphans       Delete orphan torrents
-  #   --interactive, -i     Prompt interactively
-  #   --deep-verify         Hash-based verification
-  #   --dedupe-dir=<path>   Output path for duplicates
-  #   --exists, -e          Act only on existing files
-  #   --load                Load .torrent files into qBittorrent
-  #  --H                   Disable human-readable sizes
   exit(1);
 }
 
@@ -70,126 +52,71 @@ GetOptions("dev-mode"       => \$opts{dev_mode},
            "log-dir=s"      => \$opts{log_dir},
            "verbose|v+"     => \$opts{verbose_level},
            "scan-zombies|z" => \$opts{scan_zombies},
+           "wiggle=i"       => \$opts{wiggle},
            "help|h"         => sub { usage(); exit(0); })
     or usage();
-
-#   "allow-fallback"   => \$opts{allow_fallback},
-#   "chunk=i"          => \$opts{chunk},
-#   "backup|b"         => \$opts{backup},
-#   "report-orphans"   => \$opts{report_orphans},
-#   "clean-orphans"    => \$opts{clean_orphans},
-#   "interactive|i"    => \$opts{interactive},
-#   "deep-verify"      => \$opts{deep_verify},
-#   "dedupe-dir=s"     => \$opts{dedupe_dir},
-#   "exists|e"         => \$opts{only_existing},
-#   "load"             => \$opts{load},
-#  "H"                => \$opts{human_bytes},
 
 # --- Set Defaults ---
 $opts{os}        = Utils::test_OS();
 $opts{dark_mode} = Utils::detect_dark_mode($opts{os});
+$opts{wiggle}      ||= 10;   # default to 10 minutes if not provided
 $opts{dedupe_dir}  ||= $cfg->{dedupe_dir}     || "duplicates";
 $opts{log_dir}     ||= $cfg->{log_dir}        || "logs";
 $opts{torrent_dir} ||= $cfg->{torrent_dir}    || "torrents";
 $opts{excluded}    ||= $cfg->{excluded_paths} || [];
 make_path($opts{log_dir}) unless -d $opts{log_dir};
+my $color_schema = Utils::load_color_schema($opts{dark_mode});
 
 Logger::init(\%opts);
-my $used_opts = Utils::extract_used_cli_opts(\%opts);
-Logger::log_used_opts($used_opts);
 
+# --- Locate Torrents ---
 my @all_t = FileLocator::locate_l_torrents(\%opts);
 
-my $qb             = QBittorrent->new(%opts);
-my $q_prefs        = $qb->get_preferences();
+# --- Load QBittorrent ---
+my $qb  = QBittorrent->new(%opts);
 my $qbt_loaded_tor = $qb->get_torrents_infohash();
 
-my $q_zombie_count = "use --scan-zombies for value. Can be slow";
+# --- Extract Metadata (try cache first) ---
+my ($parsed_torrents, $parsed_file) = Utils::load_cache('parsed');
+my ($dupes_by_infohash, $dupes_file) = Utils::load_cache('dupes');
+my ($problem_torrents, $problems_file) = Utils::load_cache('problems');
 
-say "\n--- Extract Metadata ---";
+unless ($parsed_torrents && $dupes_by_infohash && $problem_torrents) {
+    Logger::warn("[WARN] Missing one or more caches — computing from scratch");
+    ($parsed_torrents, $dupes_by_infohash, $problem_torrents) =
+        TorrentParser::extract_metadata(\@all_t, \%opts);
+    Utils::write_cache($parsed_torrents, 'parsed');
+    Utils::write_cache($dupes_by_infohash, 'dupes');
+    Utils::write_cache($problem_torrents, 'problems');
+}
 
-# this will also cull duplicate torrents via $infohash
-# actual deletion of the files will happen elsewhere
-my ($parsed_torrents, $dupes_by_infohash, $problem_torrents) =
-    TorrentParser::extract_metadata(\@all_t, \%opts);
+my @torrents_extracted_successfully = values %$parsed_torrents;
 
 # --- Zombie Detection ---
 my $zm = ZombieManager->new(qb => $qb);
+my ($zombies, $zombie_file) = Utils::load_cache('zombies');
 
-my $zombies;
-
-if ($opts{scan_zombies})
-{
-  Logger::info("[INFO] Performing full zombie scan...");
-  $zombies = $zm->scan_full();
-  ZombieManager::write_cache($zombies) if $zombies;
-}
-else
-{
-  $zombies = ZombieManager::load_cache();
-  if ($zombies)
-  {
-    Logger::info("[INFO] Using zombies from existing cache");
-  }
-  else
-  {
-    Logger::warn(
-           "[WARN] No zombie cache available — skipping zombie classification");
-  }
+if ($opts{scan_zombies} || !$zombies) {
+    Logger::info("[INFO] Performing full zombie scan...");
+    $zombies = $zm->scan_full();
+    Utils::write_cache($zombies, 'zombies');
 }
 
-# Step 2: Classify only if we actually have zombies
-my $heal_candidates = {};
-if ($zombies)
-{
-  $heal_candidates =
-      ZombieManager::classify_zombies_by_infohash_name($zombies,
-                                                       $parsed_torrents);
-}
+# --- Match by Date ---
+my $result = $zm->match_by_date(\@torrents_extracted_successfully, $opts{wiggle});
+Logger::info("[MATCHES] Found " . scalar(@{$result->{matches}}) . " zombies with matching torrent files");
+Logger::info("[NO DATE] " . scalar(@{$result->{no_added_on}}) . " zombies missing added_on, sent to next filter");
+Utils::write_cache($result->{matches}, 'matches');
 
-# Export heal candidates JSON
-if (keys %{$zm->{heal_candidates}})
-{
-  $zm->write_heal_candidates();
+# --- Dev Mode Summary ---
+if ($opts{dev_mode}) {
+    DevTools::print_cache_summary({
+        parsed  => 'parsed',
+        dupes   => 'dupes',
+        problems=> 'problems',
+        zombies => 'zombies',
+        matches => 'matches'
+    });
 }
-
-# Optional: export disposal candidates
-if (keys %{$zm->{disposal_candidates}})
-{
-  $zm->write_disposal_candidates();
-}
-
-say "\n--- Summary ---";
 
 Logger::info("[SUMMARY] Deduplication complete 🚧");
-Logger::info("[SUMMARY] Total discovered on disk        \t" . scalar(@all_t));
-Logger::info("[SUMMARY] Torrents loaded in qBittorrent     \t"
-             . scalar(keys %{$qbt_loaded_tor}));
-Logger::info("[SUMMARY] Zombie torrents in qBittorrent: \t" . $q_zombie_count);
-Logger::info("[SUMMARY] Torrents extracted successfully: \t" . scalar
-             keys %$parsed_torrents);
-Logger::info("[SUMMARY] Duplicate torrents found: \t\t" . scalar
-             keys %$dupes_by_infohash);
-Logger::info(
-          "[SUMMARY] Failed to parse: \t\t\t" . scalar keys %$problem_torrents);
-
-say "\n--- Export dedup report ---";
-
-my $ts = strftime("%Y-%m-%dT%H:%M:%SZ", gmtime());
-my $report = {report_type    => 'torrent_dedupe',
-              schema_version => 1,
-              timestamp      => $ts,
-              summary        => {
-                          discovered    => scalar(@all_t),
-                          parsed_unique => scalar keys %$parsed_torrents,
-                          duplicates    => scalar keys %$dupes_by_infohash,
-                          failed_parse  => scalar keys %$problem_torrents,
-                         },
-              dupes => [values %$dupes_by_infohash],};
-
-my $json_obj = JSON->new->utf8->pretty;
-
-my $json_str = $json_obj->encode($report);
-
-write_file("dedupe_report.json", JSON->new->utf8->pretty->encode($report));
-Logger::info("[EXPORT] dedupe_report.json written");

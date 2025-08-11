@@ -6,10 +6,11 @@ use warnings;
 use LWP::UserAgent;
 use HTTP::Cookies;
 use JSON;
-use Utils qw(start_timer
-            stop_timer
-            load_infohash_cache
-            );
+
+
+use lib 'lib/';
+use Logger;
+use Utils qw(start_timer stop_timer);
 
 my %opts;
 

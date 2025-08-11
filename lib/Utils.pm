@@ -1,53 +1,77 @@
-
 package Utils;
 
-use common::sense;
-use Exporter 'import';
-use Number::Bytes::Human ();
-use File::Basename;
-use Time::HiRes qw(gettimeofday tv_interval);
-use JSON;
-use File::Spec;
+use Logger;
 use File::Path qw(make_path);
+use File::Spec;
 use POSIX qw(strftime);
 use File::Slurp;
+use Time::HiRes qw(gettimeofday tv_interval);
+use JSON;
+use Exporter 'import';
+our @EXPORT_OK = qw(start_timer stop_timer);
 
-our @EXPORT_OK = qw(
-    test_OS
-    detect_dark_mode
-    extract_used_cli_opts
-    start_timer
-    stop_timer
-    load_infohash_cache
-    );
+# Always-available cache writer
+sub write_cache {
+    my ($data, $label) = @_;
+    return unless defined $data && $label;
 
+    my $dir = "cache";
+    make_path($dir) unless -d $dir;
 
-# --- Timing Utilities ---
-my %_timers;
-sub start_timer { $_timers{$_[0]} = [gettimeofday]; }
-	Logger::debug("#	start_timer");
+    my $latest_file = File::Spec->catfile($dir, "zombies_cache_${label}_latest.json");
+    my $ts          = strftime("%y.%m.%d-%H%M", localtime);
+    my $ts_file     = File::Spec->catfile($dir, "zombies_cache_${label}_${ts}.json");
 
+    # Write both timestamped and latest versions
+    my $json = JSON->new->utf8->pretty->encode($data);
+    write_file($ts_file, $json);
+    write_file($latest_file, $json);
 
-sub stop_timer {
-	Logger::debug("#	stop_timer");
-  my $label = $_[0];
-  return Logger::warn("[TIMER] No start time recorded for '$label'")
-    unless $_timers{$label};
-  my $elapsed = tv_interval($_timers{$label});
-  Logger::debug(sprintf("[TIMER] %s took %.2f seconds", $label, $elapsed));
+    Logger::info("[INFO] Cache written for '$label' -> $latest_file (" .
+                 _count_entries($data) . " entries)");
+
+    return $latest_file;
 }
 
+# Always-available cache loader
+sub load_cache {
+    my ($label) = @_;
+    return unless $label;
+
+    my $file = File::Spec->catfile("cache", "zombies_cache_${label}_latest.json");
+    return unless -e $file;
+
+    my $data = decode_json(read_file($file));
+    Logger::info("[INFO] Loaded '$label' from cache -> $file (" .
+                 _count_entries($data) . " entries)");
+
+    return ($data, $file);
+}
+
+# Internal helper: count items in data
+sub _count_entries {
+    my ($data) = @_;
+    return (ref $data eq 'HASH') ? scalar keys %$data
+         : (ref $data eq 'ARRAY') ? scalar @$data
+         : 1;
+}
 
 sub test_OS {
-	Logger::debug("#	test_OS");
-    my $osname = $^O;  # Perl's built-in OS name
+    my $osname = $^O;  # Built-in Perl variable for OS name
 
-    return "macos" if $osname =~ /darwin/i;
-    return "linux" if $osname =~ /linux/i;
-    return "freebsd" if $osname =~ /freebsd/i;
-    return "unknown";
+    if ($osname =~ /darwin/i) {
+        return 'macos';
+    }
+    elsif ($osname =~ /linux/i) {
+        return 'linux';
+    }
+    elsif ($osname =~ /MSWin32/i) {
+        return 'windows';
+    }
+    else {
+        return lc $osname; # Fallback: return raw OS name in lowercase
+    }
 }
-
 
 sub detect_dark_mode {
 	Logger::debug("#	detect_dark_mode");
@@ -68,20 +92,46 @@ sub detect_dark_mode {
     return 0; # default to light mode if unknown
 }
 
+sub load_color_schema {
+    my ($dark_mode) = @_;
 
-sub extract_used_cli_opts {
-	Logger::debug("#	extract_used_cli_opts");
-    my ($opts) = @_;
-    my %used;
-
-  foreach my $key (sort keys %$opts) {
-    next unless defined $opts->{$key};
-    $used{$key} = $opts->{$key};
-  }
-    return \%used;
+    # ANSI escape codes for colors
+    if ($dark_mode) {
+        return {
+            info    => "\e[38;5;81m",   # bright cyan
+            warn    => "\e[38;5;214m",  # bright orange
+            error   => "\e[38;5;196m",  # bright red
+            success => "\e[38;5;82m",   # bright green
+            debug   => "\e[38;5;244m",  # light grey
+            reset   => "\e[0m",
+        };
+    }
+    else {
+        return {
+            info    => "\e[34m",        # blue
+            warn    => "\e[33m",        # yellow
+            error   => "\e[31m",        # red
+            success => "\e[32m",        # green
+            debug   => "\e[90m",        # dark grey
+            reset   => "\e[0m",
+        };
+    }
 }
 
+# --- Timing Utilities ---
+my %_timers;
+sub start_timer { $_timers{$_[0]} = [gettimeofday]; }
+	Logger::debug("#	start_timer");
 
+
+sub stop_timer {
+	Logger::debug("#	stop_timer");
+  my $label = $_[0];
+  return Logger::warn("[TIMER] No start time recorded for '$label'")
+    unless $_timers{$label};
+  my $elapsed = tv_interval($_timers{$label});
+  Logger::debug(sprintf("[TIMER] %s took %.2f seconds", $label, $elapsed));
+}
 
 #
 # sub human_bytes {
