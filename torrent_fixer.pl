@@ -65,6 +65,7 @@ $opts{log_dir}     ||= $cfg->{log_dir}        || "logs";
 $opts{torrent_dir} ||= $cfg->{torrent_dir}    || "torrents";
 $opts{excluded}    ||= $cfg->{excluded_paths} || [];
 make_path($opts{log_dir}) unless -d $opts{log_dir};
+Utils::ensure_directories(\%opts);
 my $color_schema = Utils::load_color_schema($opts{dark_mode});
 
 Logger::init(\%opts);
@@ -94,18 +95,44 @@ my @torrents_extracted_successfully = values %$parsed_torrents;
 
 # --- Zombie Detection ---
 my $zm = ZombieManager->new(qb => $qb);
+my $q_zombie_count = "use --scan-zombies for value. Can be slow";
 my ($zombies, $zombie_file) = Utils::load_cache('zombies');
 
-if ($opts{scan_zombies} || !$zombies) {
+# --- Zombie Detection ---
+my $zm = ZombieManager->new(qb => $qb);
+
+# Try to load zombies cache
+my ($zombies, $zombie_file) = Utils::load_cache('zombies');
+
+if ($opts{scan_zombies}) {
+    # Explicit scan requested — perform full zombie scan and update cache
     Logger::info("[INFO] Performing full zombie scan...");
     $zombies = $zm->scan_full();
     Utils::write_cache($zombies, 'zombies');
 }
+elsif (!$zombies) {
+    # No cache and no scan requested — skip detection
+    Logger::warn("[WARN] No zombie cache available — skipping zombie detection");
+}
+
+if ($zombies) {
+    # Perform match-by-date filtering if we have zombies (from cache or fresh scan)
+    my $result = $zm->match_by_date(\@torrents_extracted_successfully, $opts{wiggle});
+
+    $q_zombie_count = $result->{matches_count} // scalar keys %$zombies;
+
+    Logger::info("[MATCHES] $result->{matches_count} zombies matched torrent files");
+    Logger::info("[NO DATE] $result->{no_added_on_count} zombies passed through filter (no added_on)");
+    Logger::info("[NO SAVE PATH] $result->{no_save_path_count} zombies passed through filter (no save_path)");
+
+    # Always write matches to cache for further processing
+    Utils::write_cache($result->{matches}, 'matches');
+}
 
 # --- Match by Date ---
 my $result = $zm->match_by_date(\@torrents_extracted_successfully, $opts{wiggle});
-Logger::info("[MATCHES] Found " . scalar(@{$result->{matches}}) . " zombies with matching torrent files");
-Logger::info("[NO DATE] " . scalar(@{$result->{no_added_on}}) . " zombies missing added_on, sent to next filter");
+Logger::info("[MATCHES] Found $result->{match_count} zombies with matching torrent files");
+Logger::info("[NO DATE] $result->{no_added_on_count} zombies missing added_on, sent to next filter");
 Utils::write_cache($result->{matches}, 'matches');
 
 # --- Dev Mode Summary ---
@@ -118,5 +145,38 @@ if ($opts{dev_mode}) {
         matches => 'matches'
     });
 }
+# --- mdfind Skipped Query Report ---
+if ($Utils::mdfind_skipped_invalid > 0 || $Utils::mdfind_skipped_unsafe > 0) {
+    Logger::warn("[WARN] Skipped mdfind queries due to invalid or unsafe input:");
+    Logger::warn("  Invalid/empty queries skipped: $Utils::mdfind_skipped_invalid")
+        if $Utils::mdfind_skipped_invalid > 0;
+    Logger::warn("  Unsafe queries skipped: $Utils::mdfind_skipped_unsafe")
+        if $Utils::mdfind_skipped_unsafe > 0;
+
+    # Optional: dump the actual queries for debugging
+    if (@Utils::mdfind_invalid_queries) {
+        Logger::info("[INFO] Skipped queries list:");
+        foreach my $bad (@Utils::mdfind_invalid_queries) {
+            Logger::info("    $bad");
+        }
+    }
+}
+say "\n--- Summary ---";
+
+my $zombie_total = $zombies && ref $zombies eq 'HASH' ? scalar keys %$zombies : 0;
+my $matched_total = $result && ref $result->{matches} eq 'ARRAY' ? scalar @{$result->{matches}} : 0;
 
 Logger::info("[SUMMARY] Deduplication complete 🚧");
+Logger::info("[SUMMARY] Total discovered on disk        \t" . scalar(@all_t));
+Logger::info("[SUMMARY] Torrents loaded in qBittorrent     \t" . scalar(keys %{$qbt_loaded_tor}));
+Logger::info("[SUMMARY] Zombie torrents in qBittorrent: \t$zombie_total");
+Logger::info("[SUMMARY] Torrents extracted successfully: \t" . scalar keys %$parsed_torrents);
+Logger::info("[SUMMARY] Duplicate torrents found: \t\t" . scalar keys %$dupes_by_infohash);
+Logger::info("[SUMMARY] Failed to parse: \t\t\t" . scalar keys %$problem_torrents);
+Logger::info("[SUMMARY] Zombies matched torrent files: \t$matched_total");
+Logger::info("[SUMMARY] Zombies with no added_on: \t\t" . ($result->{no_added_on_count} // 0));
+Logger::info("[SUMMARY] Zombies with no save_path: \t\t" . ($result->{no_save_path_count} // 0));
+
+# Positive match highlight
+Logger::info("[MATCH] Successfully matched $matched_total zombies to torrent files") if $matched_total > 0;
+

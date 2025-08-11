@@ -6,7 +6,9 @@ use File::Spec;
 use File::Slurp;
 use JSON;
 use POSIX qw(strftime);
+
 use lib 'lib';
+use Utils;
 use Logger;
 use Exporter 'import';
 
@@ -48,46 +50,74 @@ sub scan_full {
     }
     print "\r" . (' ' x 50) . "\r"; # Clear spinner line
 
-    Logger::info("[SUMMARY] Zombie torrents in qBittorrent: " . scalar keys %zombies);
-    write_cache(\%zombies);
+    my $total_zombies = scalar keys %zombies;
+    Logger::info("[SUMMARY] Zombie torrents in qBittorrent: $total_zombies");
+
+    # Always write zombies cache — keep 2 latest copies
+    my $cache_file = Utils::write_cache(\%zombies, 'zombies', 2);
+    Logger::info("[INFO] Zombie cache written to $cache_file ($total_zombies entries)");
+
+    $self->{zombies} = \%zombies;   # keep in object for later
     return \%zombies;
 }
 
 sub write_cache {
-    my ($zombies, $label) = @_;
-    return unless $zombies && ref $zombies eq 'HASH';
+    my ($data, $type, $keep_count) = @_;
+    return unless $data;
+    $keep_count ||= 2; # default to keeping 2 latest
 
     my $dir = "cache";
     make_path($dir) unless -d $dir;
 
+    # Build file pattern for this cache type
+    my $prefix = "zombies_cache_" . ($type || 'default');
+
+    # Clean up old cache files first
+    my @files = sort { -M $a <=> -M $b } glob("$dir/${prefix}_*.json");
+    if (@files > $keep_count) {
+        my @to_delete = @files[0 .. $#files - $keep_count];
+        unlink @to_delete;
+        Logger::info("[CLEANUP] Removed " . scalar(@to_delete) . " old cache files for type '$type'");
+    }
+
+    # Write the new cache file
     my $ts = strftime("%y.%m.%d-%H%M", localtime);
-    my $suffix = $label ? "_$label" : "";
-    my $file = File::Spec->catfile($dir, "zombies_cache${suffix}_${ts}.json");
+    my $file = File::Spec->catfile($dir, "${prefix}_${ts}.json");
+    write_file($file, JSON->new->utf8->pretty->encode($data));
 
-    # Write the new cache first
-    write_file($file, JSON->new->utf8->pretty->encode($zombies));
-    Logger::info("[INFO] Zombie cache written to $file (" . scalar(keys %$zombies) . " entries)");
+    Logger::info("[INFO] Zombie cache written to $file (" . scalar(keys %$data) . " entries)");
 
-    # Now remove all older caches of this type
-    my $pattern = $label ? "$dir/zombies_cache_${label}_*.json" : "$dir/zombies_cache_*.json";
-    my @old_files = grep { $_ ne $file } glob($pattern);
-    unlink @old_files if @old_files;
+    # Update latest symlink/marker file
+    my $latest = File::Spec->catfile($dir, "${prefix}_latest.json");
+    unlink $latest if -e $latest;
+    symlink $file, $latest or warn "[WARN] Could not create symlink $latest: $!";
 
     return $file;
 }
 
 sub load_cache {
-    my ($self) = @_;
-    my ($latest) = sort { $b cmp $a } glob("cache/zombies_cache_*.json");
-    return unless $latest && -f $latest;
+    my ($label) = @_;
 
-    my $json;
-    eval { $json = decode_json(read_file($latest)); };
-    if ($@) {
-        Logger::error("[ERROR] Failed to read zombie cache: $@");
+    die "[ERROR] load_cache() missing label argument" unless defined $label;
+
+    my $dir = "cache";
+    my $latest = File::Spec->catfile($dir, "zombies_cache_${label}_latest.json");
+
+    unless (-e $latest) {
+        Logger::warn("[WARN] No cache found for label '$label' — need to run a scan");
         return;
     }
-    Logger::info("[INFO] Loaded zombie cache from $latest (" . scalar(keys %$json) . " entries)");
+
+    my $json;
+    eval {
+        $json = decode_json(read_file($latest));
+        1;
+    } or do {
+        Logger::error("[ERROR] Failed to read/parse cache '$latest': $@");
+        return;
+    };
+
+    Logger::info("[INFO] Zombie cache [$label] loaded from $latest (" . scalar(keys %$json) . " entries)");
     return $json;
 }
 
@@ -186,46 +216,65 @@ sub classify_zombies_by_infohash_name {
     };
 }
 
-
 sub match_by_date {
     my ($self, $extracted_ref, $wiggle_minutes) = @_;
     $wiggle_minutes ||= 10;
 
-    return unless $extracted_ref && ref $extracted_ref eq 'ARRAY';
-    return unless $self->{zombies} && ref $self->{zombies} eq 'HASH';
+    return { matches => [], no_added_on => [], no_save_path => [], matches_count => 0, no_added_on_count => 0,
+no_save_path_count => 0 }
+        unless $extracted_ref && ref $extracted_ref eq 'ARRAY';
 
-    my %extracted = map { $_->{hash} => $_ } @$extracted_ref;
+    my $zombies_ref = [ values %{$self->{zombies}} ];
+    my @matches;
+    my @no_added_on;
+    my @no_save_path;
 
-    foreach my $hash (keys %{$self->{zombies}}) {
-        my $zombie = $self->{zombies}{$hash};
+    foreach my $zombie (@$zombies_ref) {
 
-        # Skip if no added_on
-        unless (exists $zombie->{added_on} && defined $zombie->{added_on}) {
-            $zombie->{match_by_date} = 0;
+        unless ($zombie->{added_on}) {
+            push @no_added_on, $zombie;
             next;
         }
 
-        my $added_on_ts = $zombie->{added_on};
-        if (exists $extracted{$hash} && defined $extracted{$hash}{mtime}) {
-            my $mtime = $extracted{$hash}{mtime};
-            my $diff  = abs($mtime - $added_on_ts);
+        my $added_on_epoch = $zombie->{added_on};
+        my $start_time     = POSIX::strftime("%Y-%m-%d %H:%M:%S", localtime($added_on_epoch - ($wiggle_minutes * 60)));
+        my $end_time       = POSIX::strftime("%Y-%m-%d %H:%M:%S", localtime($added_on_epoch + ($wiggle_minutes * 60)));
 
-            # Wiggle in seconds
-            if ($diff <= ($wiggle_minutes * 60)) {
-                $zombie->{match_by_date} = 1;
-            } else {
-                $zombie->{match_by_date} = 0;
-            }
+        my $search_string = qq{kMDItemFSName=*.torrent && kMDItemFSCreationDate>="$start_time" &&
+kMDItemFSCreationDate<="$end_time"};
+        Logger::trace("[TRACE] Spotlight query for zombie $zombie->{name}: $search_string");
+
+        # Call the shared Utils method
+        my $results_ref = Utils::run_mdfind(query => $search_string);
+        my @results     = @$results_ref;
+        Logger::trace("[TRACE] Spotlight results for $zombie->{name}: " . scalar(@results) . " hits");
+
+        # Filter by save_path if present
+        if ($zombie->{save_path} && @results) {
+            my $before_count = scalar(@results);
+            @results = grep { index($_, $zombie->{save_path}) != -1 } @results;
+            Logger::trace("[TRACE] Filtered by save_path ($zombie->{save_path}): $before_count → " . scalar(@results));
         } else {
-            $zombie->{match_by_date} = 0;
+            Logger::debug("[DEBUG] No save_path for zombie $zombie->{name}");
+            push @no_save_path, $zombie unless @results;
+        }
+
+        if (@results) {
+            $zombie->{matched_path} = $results[0]; # store the first match
+            $zombie->{flag_for_deeper_testing} = 1;
+            push @matches, $zombie;
         }
     }
 
-    # No explicit return — modifies $self->{zombies} in place
-    return;
+    return {
+        matches             => \@matches,
+        no_added_on         => \@no_added_on,
+        no_save_path        => \@no_save_path,
+        matches_count       => scalar(@matches),
+        no_added_on_count   => scalar(@no_added_on),
+        no_save_path_count  => scalar(@no_save_path),
+    };
 }
-
-
 
 
 1;
