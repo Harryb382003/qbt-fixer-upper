@@ -13,6 +13,18 @@ use Logger;
 #     dupes   => 'dupes',
 #     zombies => 'zombies'
 # });
+
+sub chunk {
+    my ($hashref, $size) = @_;
+    $size ||= 5;
+
+    my @keys = (keys %$hashref)[0 .. ($size - 1)];
+    my %chunked = map { $_ => $hashref->{$_} } @keys;
+
+    return \%chunked;
+}
+
+
 sub print_cache_summary {
     my ($labels_ref) = @_;
     Logger::info("\n--- Cache Summary ---");
