@@ -6,10 +6,9 @@ use Cwd qw(abs_path);
 use File::Basename;
 use File::Spec;
 use File::Path qw(make_path);
-use Time::HiRes qw(gettimeofday tv_interval);
-
-use lib 'lib/';
 use Logger;
+use Time::HiRes qw(gettimeofday tv_interval);
+use lib 'lib/';
 use Utils qw(start_timer stop_timer);
 
 use Exporter 'import';
