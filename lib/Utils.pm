@@ -91,8 +91,10 @@ sub write_cache {
 
 sub load_cache {
     my ($type) = @_;
-    die "[FATAL] load_cache() missing required 'type' argument\n"
-        unless $type && $type =~ /^[a-z0-9_]+$/i;
+    unless ($type && $type =~ /^[a-z0-9_]+$/i) {
+    Logger::warn("[WARN] load_cache() called without valid type — skipping load");
+    return;
+}
 
     my $dir = "cache";
     my $latest = File::Spec->catfile($dir, "zombies_cache_${type}_latest.json");
@@ -215,25 +217,21 @@ sub stop_timer {
 }
 
 sub run_mdfind {
-    my (%args) = @_;
-    my $query    = $args{query}    || '';
-    my $max_hits = $args{max_hits} || 0;  # 0 = no limit
+    my ($query) = @_;
 
-    unless ($query) {
+    unless (defined $query && length $query) {
         Logger::warn("[WARN] run_mdfind called with no query");
         return [];
     }
 
-    my $cmd = sprintf('mdfind %s', shell_quote($query));
+    # Determine if we keep stderr or not
+    my $stderr_redirect = $opts{debug_mdfind} ? '' : ' 2>/dev/null';
+
+    my $cmd = sprintf('mdfind %s%s', shell_quote($query), $stderr_redirect);
     Logger::debug("[DEBUG] Running Spotlight query: $cmd");
 
     my @results = `$cmd`;
     chomp @results;
-
-    # Apply optional limit
-    if ($max_hits && @results > $max_hits) {
-        @results = @results[0 .. $max_hits-1];
-    }
 
     Logger::info("[INFO] mdfind returned " . scalar(@results) . " results for query: $query");
     return \@results;
