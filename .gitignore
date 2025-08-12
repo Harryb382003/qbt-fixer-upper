@@ -166,3 +166,6 @@ Icon?
 !*.pm
 !*.t
 torrent_fixer.pl.kate-swp
+.sandbox/
+.sandbox/
+torrent_fixer_diff.txt

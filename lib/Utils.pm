@@ -1,19 +1,25 @@
 package Utils;
 
-use Logger;
+use common::sense;
 use File::Path qw(make_path);
 use File::Spec;
+use File::Basename qw(basename);
 use POSIX qw(strftime);
 use File::Slurp;
+use String::ShellQuote qw(shell_quote);
 use Time::HiRes qw(gettimeofday tv_interval);
 use JSON;
 use Exporter 'import';
+
+use lib 'lib';
+use Logger;
+
+
 our @EXPORT_OK = qw(
                 start_timer
                 stop_timer
                 _find_latest_cache_file
                 );
-use String::ShellQuote qw(shell_quote);
 
 sub ensure_directories {
     my ($opts) = @_;
@@ -106,7 +112,7 @@ sub load_cache {
 
     my $data = decode_json(read_file($latest));
     Logger::info("[INFO] $type cache loaded from $latest (" . _count_entries($data) . " entries)");
-    return $data;
+    return ($data, $latest);
 }
 
 sub _count_entries {
@@ -214,10 +220,13 @@ sub stop_timer {
     unless $_timers{$label};
   my $elapsed = tv_interval($_timers{$label});
   Logger::debug(sprintf("[TIMER] %s took %.2f seconds", $label, $elapsed));
+  return $elapsed;
 }
 
 sub run_mdfind {
-    my ($query) = @_;
+    my %opts;
+    my ($query, $opts) = @_;
+    $opts ||= {};
 
     unless (defined $query && length $query) {
         Logger::warn("[WARN] run_mdfind called with no query");
@@ -260,7 +269,58 @@ sub _find_latest_cache_file {
     return "$cache_dir/$files[0]";
 }
 
+sub get_mdls {
+    my ($input) = @_;
+    Utils::start_timer("mdls");
 
+    # Normalize input to a list of file paths
+    my @paths;
+    if (ref $input eq 'HASH') {
+        @paths = map { $input->{$_}->{source_path} // $input->{$_}->{path} } keys %$input;
+    } elsif (ref $input eq 'ARRAY') {
+        @paths = @$input;
+    } elsif (!ref $input) {
+        @paths = ($input);
+    } else {
+        die "[FATAL] get_mdls() called with unsupported input type";
+    }
+
+    my %results;
+    my $count = 0;
+
+    foreach my $path (@paths) {
+        next unless defined $path && -f $path;
+
+        # Escape single quotes for safe shell command
+        (my $safe_path = $path) =~ s/'/'"'"'/g;
+
+        my $mdls_output = `mdls '$safe_path' 2>&1`;
+        if ($? != 0) {
+            say "mdls puked on $path: $mdls_output";
+            die "[FATAL] mdls failed for $path";
+        }
+        my %fields;
+        for my $line (split /\n/, $mdls_output) {
+            if ($line =~ /^(kMDItemFSCreationDate)\s+=\s+(.+)/)      { $fields{$1} = $2 }
+            elsif ($line =~ /^(kMDItemContentType)\s+=\s+(.+)/)      { $fields{$1} = $2 }
+            elsif ($line =~ /^(kMDItemDateAdded)\s+=\s+(.+)/)        { $fields{$1} = $2 }
+            elsif ($line =~ /^(kMDItemDisplayName)\s+=\s+(.+)/)      { $fields{$1} = $2 }
+            elsif ($line =~ /^(kMDItemFSName)\s+=\s+(.+)/)           { $fields{$1} = $2 }
+            elsif ($line =~ /^(kMDItemLogicalSize)\s+=\s+(.+)/)      { $fields{$1} = $2 }
+            elsif ($line =~ /^(kMDItemPhysicalSize)\s+=\s+(.+)/)     { $fields{$1} = $2 }
+            elsif ($line =~ /^(kMDItemFSSize)\s+=\s+(.+)/)           { $fields{$1} = $2 }
+        }
+
+        $results{$path} = \%fields;
+        $count++;
+say "$count\t " . basename($path);
+    }
+
+    my $elapsed =  Utils::stop_timer("mdls");
+    say "[MDLS] Processed metadata for $count files in ${elapsed}s.";
+
+    return \%results;
+}
 
 #
 # sub human_bytes {

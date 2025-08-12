@@ -15,6 +15,7 @@ use Exporter 'import';
 our @EXPORT_OK = qw(
 	write_cache
 	);
+
 sub new {
     my ($class, %args) = @_;
     my $self = {
@@ -57,7 +58,12 @@ sub scan_full {
     my $cache_file = Utils::write_cache(\%zombies, 'zombies', 2);
     Logger::info("[INFO] Zombie cache written to $cache_file ($total_zombies entries)");
 
-    $self->{zombies} = \%zombies;   # keep in object for later
+    if (\%zombies && (ref(\%zombies) ? scalar(%{\%zombies}) || scalar(@{\%zombies}) : length(\%zombies))) {
+        $self->{zombies} = \%zombies;
+    } else {
+        Logger::warn("[WARN] In sub scan_full: $self->{zombies} assigned empty value");
+        $self->{zombies} = \%zombies;
+    }
     return \%zombies;
 }
 
@@ -220,61 +226,87 @@ sub match_by_date {
     my ($self, $extracted_ref, $wiggle_minutes) = @_;
     $wiggle_minutes ||= 10;
 
-    return { matches => [], no_added_on => [], no_save_path => [], matches_count => 0, no_added_on_count => 0,
-no_save_path_count => 0 }
-        unless $extracted_ref && ref $extracted_ref eq 'ARRAY';
+    return {
+        matches            => [],
+        no_added_on        => ["NOT USED"],
+        no_save_path       => ["NOT USED"],
+        matches_count      => 0,
+        no_added_on_count  => 0,
+        no_save_path_count => 0
+    } unless $extracted_ref && ref $extracted_ref eq 'ARRAY';
 
     my $zombies_ref = [ values %{$self->{zombies}} ];
     my @matches;
-    my @no_added_on;
-    my @no_save_path;
+    my @no_added_on;     # kept for diagnostics but "NOT USED"
+    my @no_save_path;    # kept for diagnostics but "NOT USED"
 
     foreach my $zombie (@$zombies_ref) {
 
+
+
+
+if ($opts{dev_mode}) {
+    my $torrent_path = $zombie->{full_path} // '';
+    if (-f $torrent_path) {
+        Logger::info("[DEV] Spotlight full dump for: $torrent_path");
+        my @mdls_output = `mdls "$torrent_path" 2>/dev/null`;
+        chomp @mdls_output;
+        Logger::trace($_) for @mdls_output;
+    } else {
+        Logger::warn("[DEV] No file found for zombie: $zombie->{name}");
+    }
+}
+
+
+
+
+
         unless ($zombie->{added_on}) {
-            push @no_added_on, $zombie;
+            push @no_added_on, $zombie; # shouldn't happen, but we keep the data
             next;
         }
 
         my $added_on_epoch = $zombie->{added_on};
-        my $start_time     = POSIX::strftime("%Y-%m-%d %H:%M:%S", localtime($added_on_epoch - ($wiggle_minutes * 60)));
-        my $end_time       = POSIX::strftime("%Y-%m-%d %H:%M:%S", localtime($added_on_epoch + ($wiggle_minutes * 60)));
+        my $start_time     = POSIX::strftime(
+            "%Y-%m-%d %H:%M:%S",
+            localtime($added_on_epoch - ($wiggle_minutes * 60))
+        );
+        my $end_time = POSIX::strftime(
+            "%Y-%m-%d %H:%M:%S",
+            localtime($added_on_epoch + ($wiggle_minutes * 60))
+        );
 
-        my $search_string = qq{kMDItemFSName=*.torrent && kMDItemFSCreationDate>="$start_time" &&
-kMDItemFSCreationDate<="$end_time"};
+        my $search_string = qq{
+            kMDItemFSName=="*.torrent" &&
+            kMDItemContentType=com.bittorrent.torrent &&
+            kMDItemFSCreationDate>="$start_time" &&
+            kMDItemFSCreationDate<="$end_time"
+        };
+        $search_string =~ s/\s+/ /g; # flatten whitespace for shell
         Logger::trace("[TRACE] Spotlight query for zombie $zombie->{name}: $search_string");
 
-        # Call the shared Utils method
-        my $results_ref = Utils::run_mdfind(query => $search_string);
+        my $results_ref = Utils::run_mdfind($search_string, \$opts);
         my @results     = @$results_ref;
         Logger::trace("[TRACE] Spotlight results for $zombie->{name}: " . scalar(@results) . " hits");
 
-        # Filter by save_path if present
-        if ($zombie->{save_path} && @results) {
-            my $before_count = scalar(@results);
-            @results = grep { index($_, $zombie->{save_path}) != -1 } @results;
-            Logger::trace("[TRACE] Filtered by save_path ($zombie->{save_path}): $before_count → " . scalar(@results));
-        } else {
-            Logger::debug("[DEBUG] No save_path for zombie $zombie->{name}");
-            push @no_save_path, $zombie unless @results;
+        if (!@results) {
+            push @no_save_path, $zombie; # actually "escaped date filter"
+            next;
         }
 
-        if (@results) {
-            $zombie->{matched_path} = $results[0]; # store the first match
-            $zombie->{flag_for_deeper_testing} = 1;
-            push @matches, $zombie;
-        }
+        $zombie->{matched_path} = $results[0];
+        $zombie->{flag_for_deeper_testing} = 1;
+        push @matches, $zombie;
     }
 
     return {
-        matches             => \@matches,
-        no_added_on         => \@no_added_on,
-        no_save_path        => \@no_save_path,
-        matches_count       => scalar(@matches),
-        no_added_on_count   => scalar(@no_added_on),
-        no_save_path_count  => scalar(@no_save_path),
+        matches            => \@matches,
+        no_added_on        => @no_added_on ? \@no_added_on : ["NOT USED"],
+        no_save_path       => @no_save_path ? \@no_save_path : ["NOT USED"],
+        matches_count      => scalar(@matches),
+        no_added_on_count  => scalar(@no_added_on),
+        no_save_path_count => scalar(@no_save_path),
     };
 }
-
 
 1;
