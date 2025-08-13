@@ -6,15 +6,17 @@ use File::Spec;
 use File::Slurp;
 use JSON;
 use POSIX qw(strftime);
+use feature qw(say);
 
 use lib 'lib';
 use Utils;
 use Logger;
 use Exporter 'import';
+use TorrentParser qw(match_by_date); # now importing from TorrentParser
 
 our @EXPORT_OK = qw(
-	write_cache
-	);
+    write_cache
+);
 
 sub new {
     my ($class, %args) = @_;
@@ -27,286 +29,89 @@ sub new {
     return $self;
 }
 
-sub scan_full {
-    my ($self) = @_;
-    my $qb = $self->{qb};
-    my %zombies;
-
-    my $session = $qb->get_torrents_infohash();
-    my @infohashes = keys %$session;
-    my $count = scalar @infohashes;
-
-    my @spinner = ('|', '/', '-', '\\');
-    my $i = 0;
-
-    foreach my $ih (@infohashes) {
-        # Spinner output
-        print "\r[SCAN] Checking $i/$count " . $spinner[$i % @spinner];
-        $i++;
-
-        my $files = $qb->get_torrent_files($ih);
-        if (!@$files) {
-            $zombies{$ih} = $session->{$ih};
-        }
-    }
-    print "\r" . (' ' x 50) . "\r"; # Clear spinner line
-
-    my $total_zombies = scalar keys %zombies;
-    Logger::info("[SUMMARY] Zombie torrents in qBittorrent: $total_zombies");
-
-    # Always write zombies cache — keep 2 latest copies
-    my $cache_file = Utils::write_cache(\%zombies, 'zombies', 2);
-    Logger::info("[INFO] Zombie cache written to $cache_file ($total_zombies entries)");
-
-    if (\%zombies && (ref(\%zombies) ? scalar(%{\%zombies}) || scalar(@{\%zombies}) : length(\%zombies))) {
-        $self->{zombies} = \%zombies;
-    } else {
-        Logger::warn("[WARN] In sub scan_full: $self->{zombies} assigned empty value");
-        $self->{zombies} = \%zombies;
-    }
-    return \%zombies;
-}
-
-sub write_cache {
-    my ($data, $type, $keep_count) = @_;
-    return unless $data;
-    $keep_count ||= 2; # default to keeping 2 latest
-
-    my $dir = "cache";
-    make_path($dir) unless -d $dir;
-
-    # Build file pattern for this cache type
-    my $prefix = "zombies_cache_" . ($type || 'default');
-
-    # Clean up old cache files first
-    my @files = sort { -M $a <=> -M $b } glob("$dir/${prefix}_*.json");
-    if (@files > $keep_count) {
-        my @to_delete = @files[0 .. $#files - $keep_count];
-        unlink @to_delete;
-        Logger::info("[CLEANUP] Removed " . scalar(@to_delete) . " old cache files for type '$type'");
-    }
-
-    # Write the new cache file
-    my $ts = strftime("%y.%m.%d-%H%M", localtime);
-    my $file = File::Spec->catfile($dir, "${prefix}_${ts}.json");
-    write_file($file, JSON->new->utf8->pretty->encode($data));
-
-    Logger::info("[INFO] Zombie cache written to $file (" . scalar(keys %$data) . " entries)");
-
-    # Update latest symlink/marker file
-    my $latest = File::Spec->catfile($dir, "${prefix}_latest.json");
-    unlink $latest if -e $latest;
-    symlink $file, $latest or warn "[WARN] Could not create symlink $latest: $!";
-
-    return $file;
-}
-
-sub load_cache {
-    my ($label) = @_;
-
-    die "[ERROR] load_cache() missing label argument" unless defined $label;
-
-    my $dir = "cache";
-    my $latest = File::Spec->catfile($dir, "zombies_cache_${label}_latest.json");
-
-    unless (-e $latest) {
-        Logger::warn("[WARN] No cache found for label '$label' — need to run a scan");
-        return;
-    }
-
-    my $json;
-    eval {
-        $json = decode_json(read_file($latest));
-        1;
-    } or do {
-        Logger::error("[ERROR] Failed to read/parse cache '$latest': $@");
-        return;
-    };
-
-    Logger::info("[INFO] Zombie cache [$label] loaded from $latest (" . scalar(keys %$json) . " entries)");
-    return $json;
-}
-
-sub classify_zombies {
-    Logger::debug("#\tclassify_zombies");
-
-    my ($zombies, $parsed_torrents) = @_;
-    die "[ERROR] Missing zombies hashref" unless $zombies && ref $zombies eq 'HASH';
-    die "[ERROR] Missing parsed_torrents hashref" unless $parsed_torrents && ref $parsed_torrents eq 'HASH';
-
-    my (%heal_candidates, %disposal_candidates);
-
-    foreach my $zih (keys %$zombies) {
-        my $zombie = $zombies->{$zih};
-        my $name   = $zombie->{name} // '';
-
-        # 1. Exact infohash match
-        if (exists $parsed_torrents->{$zih}) {
-            $heal_candidates{$zih} = $parsed_torrents->{$zih};
-        }
-        # 2. Zombie name matches a local torrent's infohash key
-        elsif ($name && exists $parsed_torrents->{$name}) {
-            $heal_candidates{$zih} = $parsed_torrents->{$name};
-        }
-        # 3. No match at all → disposal candidate
-        else {
-            $disposal_candidates{$zih} = $zombie;
-        }
-    }
-
-    Logger::info("[INFO] Heal candidates: " . scalar(keys %heal_candidates) .
-                 " / Disposal candidates: " . scalar(keys %disposal_candidates));
-
-    return (\%heal_candidates, \%disposal_candidates);
-}
-
-sub write_heal_candidates {
-    my ($self) = @_;
-    my $heal = $self->{heal_candidates};
-    return unless %$heal;
-
-    my $dir = "cache";
-    make_path($dir) unless -d $dir;
-    my $ts = strftime("%y.%m.%d-%H%M", localtime);
-    my $file = File::Spec->catfile($dir, "heal_candidates_${ts}.json");
-    write_file($file, JSON->new->utf8->pretty->encode($heal));
-
-    Logger::info("[INFO] Heal candidates written to $file (" . scalar(keys %$heal) . " entries)");
-    return $file;
-}
-
-sub write_disposal_candidates {
-    my ($self) = @_;
-    my $dispose = $self->{disposal_candidates};
-    return unless %$dispose;
-
-    my $dir = "cache";
-    make_path($dir) unless -d $dir;
-    my $ts = strftime("%y.%m.%d-%H%M", localtime);
-    my $file = File::Spec->catfile($dir, "disposal_candidates_${ts}.json");
-    write_file($file, JSON->new->utf8->pretty->encode($dispose));
-
-    Logger::info("[INFO] Disposal candidates written to $file (" . scalar(keys %$dispose) . " entries)");
-    return $file;
-}
-
-sub classify_zombies_by_infohash_name {
-    my ($zombies, $parsed) = @_;
-    Logger::debug("#\tclassify_zombies_by_infohash_name");
-
-    unless ($zombies && ref $zombies eq 'HASH') {
-        Logger::error("[ERROR] Missing zombies hashref");
-        return { heal => {}, next_filter => {} };
-    }
-    unless ($parsed && ref $parsed eq 'HASH') {
-        Logger::error("[ERROR] Missing parsed torrents hashref");
-        return { heal => {}, next_filter => {} };
-    }
-
-    my (%heal, %next_filter);
-    foreach my $ih (keys %$zombies) {
-        my $name = $zombies->{$ih}->{name};
-        if ($name && exists $parsed->{$name}) {
-            $heal{$ih} = $zombies->{$ih};
-        } else {
-            $next_filter{$ih} = $zombies->{$ih};
-        }
-    }
-
-    Logger::info("[INFO] Heal candidates: " . scalar(keys %heal));
-    Logger::info("[INFO] Sent to next filter: " . scalar(keys %next_filter));
-
-    return {
-        heal        => \%heal,
-        next_filter => \%next_filter
-    };
-}
-
 sub match_by_date {
-    my ($self, $extracted_ref, $wiggle_minutes) = @_;
+    my ($self, $wiggle_minutes, $opts) = @_;
     $wiggle_minutes ||= 10;
 
-    return {
-        matches            => [],
-        no_added_on        => ["NOT USED"],
-        no_save_path       => ["NOT USED"],
-        matches_count      => 0,
-        no_added_on_count  => 0,
-        no_save_path_count => 0
-    } unless $extracted_ref && ref $extracted_ref eq 'ARRAY';
+    my $zombies_ref = $self->{zombies} || {};
+    return unless %$zombies_ref;
 
-    my $zombies_ref = [ values %{$self->{zombies}} ];
+    # Pull mdls metadata for all zombie source paths
+    my $zombie_mdls = Utils::get_mdls($zombies_ref);
+
     my @matches;
-    my @no_added_on;     # kept for diagnostics but "NOT USED"
-    my @no_save_path;    # kept for diagnostics but "NOT USED"
+    my @no_added_on;
+    my @no_save_path;
 
-    foreach my $zombie (@$zombies_ref) {
+    foreach my $zombie_id (keys %$zombies_ref) {
+        my $zombie    = $zombies_ref->{$zombie_id};
+        my $name      = $zombie->{name}       // 'UNKNOWN';
+        my $path      = $zombie->{save_path}  // 'UNKNOWN PATH';
+        my $added_on  = $zombie->{added_on};
 
+        say "$name ($path)";
 
-
-
-if ($opts{dev_mode}) {
-    my $torrent_path = $zombie->{full_path} // '';
-    if (-f $torrent_path) {
-        Logger::info("[DEV] Spotlight full dump for: $torrent_path");
-        my @mdls_output = `mdls "$torrent_path" 2>/dev/null`;
-        chomp @mdls_output;
-        Logger::trace($_) for @mdls_output;
-    } else {
-        Logger::warn("[DEV] No file found for zombie: $zombie->{name}");
-    }
-}
-
-
-
-
-
-        unless ($zombie->{added_on}) {
-            push @no_added_on, $zombie; # shouldn't happen, but we keep the data
+        unless ($added_on) {
+            push @no_added_on, $zombie;
             next;
         }
 
-        my $added_on_epoch = $zombie->{added_on};
-        my $start_time     = POSIX::strftime(
-            "%Y-%m-%d %H:%M:%S",
-            localtime($added_on_epoch - ($wiggle_minutes * 60))
-        );
-        my $end_time = POSIX::strftime(
-            "%Y-%m-%d %H:%M:%S",
-            localtime($added_on_epoch + ($wiggle_minutes * 60))
-        );
+        # mdls info for this torrent file
+        my $source_path = $zombie->{source_path} // '';
+        my $mdls_info   = $zombie_mdls->{$source_path} || {};
+        my $created     = $mdls_info->{kMDItemFSCreationDate} // '';
+        my $added       = $mdls_info->{kMDItemDateAdded}      // '';
 
-        my $search_string = qq{
-            kMDItemFSName=="*.torrent" &&
-            kMDItemContentType=com.bittorrent.torrent &&
-            kMDItemFSCreationDate>="$start_time" &&
-            kMDItemFSCreationDate<="$end_time"
-        };
-        $search_string =~ s/\s+/ /g; # flatten whitespace for shell
-        Logger::trace("[TRACE] Spotlight query for zombie $zombie->{name}: $search_string");
-
-        my $results_ref = Utils::run_mdfind($search_string, \$opts);
-        my @results     = @$results_ref;
-        Logger::trace("[TRACE] Spotlight results for $zombie->{name}: " . scalar(@results) . " hits");
-
-        if (!@results) {
-            push @no_save_path, $zombie; # actually "escaped date filter"
-            next;
+        my $matched = 0;
+        if ($added && abs(str2epoch($added) - $added_on) <= ($wiggle_minutes * 60)) {
+            say "    match (added)";
+            $matched++;
+        }
+        if ($created && abs(str2epoch($created) - $added_on) <= ($wiggle_minutes * 60)) {
+            say "    match (creation)";
+            $matched++;
         }
 
-        $zombie->{matched_path} = $results[0];
-        $zombie->{flag_for_deeper_testing} = 1;
-        push @matches, $zombie;
+        if ($matched) {
+            push @matches, $zombie;
+        } else {
+            push @no_save_path, $zombie;
+        }
     }
+
+    Logger::info("[MATCH] $wiggle_minutes minute window — "
+        . scalar(@matches) . " matches, "
+        . scalar(@no_added_on) . " with no added_on, "
+        . scalar(@no_save_path) . " with no save_path match");
 
     return {
         matches            => \@matches,
-        no_added_on        => @no_added_on ? \@no_added_on : ["NOT USED"],
-        no_save_path       => @no_save_path ? \@no_save_path : ["NOT USED"],
+        no_added_on        => \@no_added_on,
+        no_save_path       => \@no_save_path,
         matches_count      => scalar(@matches),
         no_added_on_count  => scalar(@no_added_on),
         no_save_path_count => scalar(@no_save_path),
     };
 }
 
+
+sub str2epoch {
+    my $str = shift;
+    $str =~ s/\+0000//;  # strip UTC offset if present
+    chomp(my $epoch = `date -j -f "%Y-%m-%d %H:%M:%S" "$str" "+%s" 2>/dev/null`);
+    return $epoch || 0;
+}
+
+
+# ... other methods unchanged ...
+
+# # Delegating stub
+# sub match_by_date {
+#     my ($self, @args) = @_;
+#     return TorrentParser::match_by_date($self, @args);
+# }
+
 1;
+
+
+# I don't know what the fuck

@@ -13,7 +13,7 @@ use String::ShellQuote qw(shell_quote);
 use lib 'lib';
 use FileLocator;
 use QBittorrent;
-use TorrentParser;
+use TorrentParser qw(extract_metadata);
 use ZombieManager;
 use Utils;
 use Logger;
@@ -66,17 +66,29 @@ $opts{log_dir}     ||= $cfg->{log_dir}        || "logs";
 $opts{torrent_dir} ||= $cfg->{torrent_dir}    || "torrents";
 $opts{excluded}    ||= $cfg->{excluded_paths} || [];
 make_path($opts{log_dir}) unless -d $opts{log_dir};
+
+
 Utils::ensure_directories(\%opts);
 my $color_schema = Utils::load_color_schema($opts{dark_mode});
 
+
+# After GetOptions and before doing any cache loads
+if ($opts{'dev-mode'}) {
+    say "\e[33;1m[DEV] Developer mode active — results may be truncated for speed!\e[0m";
+}
+
+
 Logger::init(\%opts);
+
 
 # --- Locate Torrents ---
 my @all_t = FileLocator::locate_l_torrents(\%opts);
 
+
 # --- Load QBittorrent ---
 my $qb             = QBittorrent->new(%opts);
 my $qbt_loaded_tor = $qb->get_torrents_infohash();
+
 
 # --- Extract Metadata (try cache first) ---
 my ($parsed_torrents,   $parsed_file)   = Utils::load_cache('parsed');
@@ -86,8 +98,8 @@ my ($problem_torrents,  $problems_file) = Utils::load_cache('problems');
 unless ($parsed_torrents && $dupes_by_infohash && $problem_torrents)
 {
   Logger::warn("[WARN] Missing one or more caches — computing from scratch");
-  ($parsed_torrents, $dupes_by_infohash, $problem_torrents) =
-      TorrentParser::extract_metadata(\@all_t, \%opts);
+  my $parser = TorrentParser->new(%opts);
+  $parsed_torrents = $parser->extract_metadata(\@all_t, \%opts);
   Utils::write_cache($parsed_torrents,   'parsed');
   Utils::write_cache($dupes_by_infohash, 'dupes');
   Utils::write_cache($problem_torrents,  'problems');
@@ -95,14 +107,17 @@ unless ($parsed_torrents && $dupes_by_infohash && $problem_torrents)
 
 my @torrents_extracted_successfully = values %$parsed_torrents;
 
+
 # --- Zombie Detection ---
 my $zm = ZombieManager->new(qb => $qb);
 my $result;
 my $zombies;
 my $zombie_file;
 
+
 # Try to load zombies cache
 ($zombies, $zombie_file) = Utils::load_cache('zombies');
+
 
 # Ensure zombies is always a hashref, warn if empty
 $zm->{zombies} = ($zombies && %$zombies)

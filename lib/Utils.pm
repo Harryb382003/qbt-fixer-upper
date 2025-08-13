@@ -21,6 +21,19 @@ our @EXPORT_OK = qw(
                 _find_latest_cache_file
                 );
 
+
+sub str_is_datetime {
+    my $str = shift // return 0;
+    return $str =~ /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/ ? 1 : 0;
+}
+
+sub str2epoch {
+    my $str = shift // return 0;
+    $str =~ s/\+0000//;  # strip UTC offset if present
+    chomp(my $epoch = `date -j -f "%Y-%m-%d %H:%M:%S" "$str" "+%s" 2>/dev/null`);
+    return $epoch =~ /^\d+$/ ? $epoch : 0;
+}
+
 sub ensure_directories {
     my ($opts) = @_;
     my @dirs = ('cache', $opts->{log_dir}, $opts->{dedupe_dir});
@@ -214,13 +227,29 @@ sub start_timer { $_timers{$_[0]} = [gettimeofday];
  }
 
 sub stop_timer {
-	Logger::debug("#	stop_timer");
-  my $label = $_[0];
-  return Logger::warn("[TIMER] No start time recorded for '$label'")
-    unless $_timers{$label};
-  my $elapsed = tv_interval($_timers{$label});
-  Logger::debug(sprintf("[TIMER] %s took %.2f seconds", $label, $elapsed));
-  return $elapsed;
+    Logger::debug("#\tstop_timer");
+    my $label = $_[0];
+    return Logger::warn("[TIMER] No start time recorded for '$label'")
+      unless $_timers{$label};
+
+    my $elapsed = tv_interval($_timers{$label]);
+
+    my $human;
+    if ($elapsed >= 3600) {
+        $human = sprintf("%dh %02dm %02ds",
+                         int($elapsed / 3600),
+                         int(($elapsed % 3600) / 60),
+                         $elapsed % 60);
+    } elsif ($elapsed >= 60) {
+        $human = sprintf("%dm %02ds",
+                         int($elapsed / 60),
+                         $elapsed % 60);
+    } else {
+        $human = sprintf("%.2fs", $elapsed);
+    }
+
+    Logger::debug(sprintf("[TIMER] %s took %s", $label, $human));
+    return $elapsed;
 }
 
 sub run_mdfind {
@@ -322,14 +351,19 @@ say "$count\t " . basename($path);
     return \%results;
 }
 
-#
-# sub human_bytes {
-#     my ($bytes, $opts) = @_;
-# #     warn "[DEBUG] human_bytes opts: " . ($opts->{human_bytes} // 'undef') . "\n";
-#     $opts ||= {};
-#     return $opts->{human_bytes}
-#         ? "$bytes bytes"
-#         : Number::Bytes::Human::format_bytes($bytes) . "B";
-# }
+
+
+
+
+
+ub stop_timer {
+	Logger::debug("#	stop_timer");
+  my $label = $_[0];
+  return Logger::warn("[TIMER] No start time recorded for '$label'")
+    unless $_timers{$label};
+  my $elapsed = tv_interval($_timers{$label});
+  Logger::debug(sprintf("[TIMER] %s took %.2f seconds", $label, $elapsed));
+  return $elapsed;
+}
 
 1;

@@ -169,3 +169,4 @@ torrent_fixer.pl.kate-swp
 .sandbox/
 .sandbox/
 torrent_fixer_diff.txt
+lib/TorrentParser.pm.derp
