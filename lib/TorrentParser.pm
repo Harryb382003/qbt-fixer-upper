@@ -103,48 +103,56 @@ sub new {
 
 sub extract_metadata {
     my ($self, $torrent_files, $opts) = @_;
-#say "[DEBUG] extract_metadata got: " . Dumper($torrent_files);
-    my %parsed_torrents;
-    my %bucket_counts;
+    my (%parsed_torrents, %dupes, %bucket_counts);
 
     foreach my $file_path (@$torrent_files) {
-        my $info = bdecode_file($file_path);
+        my $info = Utils::bdecode_file($file_path);
         next unless $info;
+
+        my $infohash = Utils::compute_infohash($info);
+        next unless $infohash;
 
         # --- Assign bucket ---
         my $bucket;
-        if ($file_path =~ m{Completed_torrents}i) {
-            $bucket = 'completed_torrents'; # "Copy .torrent files for finished downloads to:"
-        }
-        elsif ($file_path =~ m{BT_backup}i) {
-            $bucket = 'bt_backup';          # ~BT_backup folder
-        }
-        elsif ($file_path =~ m{Downloaded_torrents}i) {
-            $bucket = 'downloaded_torrents'; # "Copy .torrent files to:"
-        }
-        else {
-            $bucket = 'kitchen_sink';        # Everything else
-        }
+        if    ($file_path =~ m{Completed_torrents}i)  { $bucket = 'completed_torrents' }
+        elsif ($file_path =~ m{BT_backup}i)           { $bucket = 'bt_backup' }
+        elsif ($file_path =~ m{Downloaded_torrents}i) { $bucket = 'downloaded_torrents' }
+        else                                          { $bucket = 'kitchen_sink' }
         $bucket_counts{$bucket}++;
 
+        # --- Dupes check ---
+        if (exists $parsed_torrents{$infohash}) {
+            # Seen before → record as dupe
+            push @{ $dupes{$infohash} }, $file_path;
+            push @{ $dupes{$infohash}->{source_paths} }, {
+                path => $file_path,
+                bucket => $bucket,
+            };
+            next;
+        }
+
         # --- Build torrent record ---
-        $parsed_torrents{$file_path} = {
-            name        => $info->{name} // '(unnamed)',
-            files       => $info->{files}
-                              ? [ map { $_->{path} } @{ $info->{files} } ]
-                              : [ $info->{name} ],
-            total_size  => $info->{files}
-                              ? sum(map { $_->{length} || 0 } @{ $info->{files} })
-                              : $info->{length} || 0,
-            raw         => $info,
-            source_path => $file_path,
-            bucket      => $bucket,
-            private     => $info->{private} ? 'Yes' : 'No',
+        $parsed_torrents{$infohash} = {
+            name         => $info->{name} // '(unnamed)',
+            files        => $info->{files}
+                               ? [ map { $_->{path} } @{ $info->{files} } ]
+                               : [ $info->{name} ],
+            total_size   => $info->{files}
+                               ? sum(map { $_->{length} || 0 } @{ $info->{files} })
+                               : $info->{length} || 0,
+            raw          => $info,
+            source_paths => [ $file_path ],  # start with current
+            bucket       => $bucket,
+            private      => $info->{private} ? 'Yes' : 'No',
         };
     }
 
     # --- Report bucket distribution ---
     report_bucket_distribution(\%bucket_counts);
+
+    # --- Write caches ---
+    Utils::write_cache(\%parsed_torrents, 'parsed');
+    Utils::write_cache(\%dupes, 'dupes') if %dupes;
 
     return \%parsed_torrents;
 }
@@ -190,27 +198,7 @@ sub report_bucket_distribution {
 }
 
 
-sub bdecode_file {
-	Logger::debug("#	bdecode_file");
-  my ($file_path) = @_;
-  my $raw;
 
-  open my $fh, '<:raw', $file_path or do {
-    Logger::warn("Cannot open $file_path: $!");
-    return undef;
-  };
-
-  {
-    local $/;
-    $raw = <$fh>;
-  }
-  close $fh;
-
-  my $decoded;
-  eval { $decoded = bdecode($raw); };
-
-  return $decoded;
-}
 
 # sub _log_problem_torrent {
 #   my ($name, $error) = @_;

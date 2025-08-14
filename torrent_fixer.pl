@@ -100,13 +100,12 @@ unless ($parsed_torrents && $dupes_by_infohash && $problem_torrents)
   Logger::warn("[WARN] Missing one or more caches — computing from scratch");
   my $parser = TorrentParser->new(%opts);
   $parsed_torrents = $parser->extract_metadata(\@all_t, \%opts);
-  Utils::write_cache($parsed_torrents,   'parsed');
   Utils::write_cache($dupes_by_infohash, 'dupes');
   Utils::write_cache($problem_torrents,  'problems');
 }
 
 my @torrents_extracted_successfully = values %$parsed_torrents;
-
+say "109 \t" .  scalar(@torrents_extracted_successfully) ;
 
 # --- Zombie Detection ---
 my $zm = ZombieManager->new(qb => $qb);
@@ -131,13 +130,13 @@ if ($zombies && %$zombies) {
     Logger::info("[INFO] zombies cache loaded from $zombie_file (" . scalar(keys %$zombies) . " entries)");
     if ($opts{dev_mode}) {
         require DevTools;
-        Logger::warn("[DEV] Chunking zombies list to first 5 entries for faster dev runs");
         $zombies = DevTools::chunk($zombies, 5);
     }
 }
 elsif ($opts{scan_zombies}) {
-    Logger::warn("[WARN] No zombie cache found — performing full zombie scan...");
-    $zombies = $zm->scan_full();
+    Logger::warn("[WARN] No zombie cache found.");
+    Logger::warn("[WARN]\tAttempting to scan qBittorrent cache for zombies (wiggle:$opts{wiggle}m)");
+    $zombies = $zm->scan_full(\%opts);
     Utils::write_cache($zombies, 'zombies') if $zombies && %$zombies;
     if ($opts{dev_mode}) {
         require DevTools;
