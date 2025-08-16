@@ -1,55 +1,49 @@
 package DevTools;
 
 use common::sense;
-use Utils;    # uses our always-available caching tools
+use Data::Dumper;
+
+use lib 'lib';
 use Logger;
 
-# --- print_cache_summary ---
-# Given a hashref of { label => label_name }, will try to load and summarize each cache.
-#
-# Example:
-# DevTools::print_cache_summary({
-#     parsed  => 'parsed',
-#     dupes   => 'dupes',
-#     zombies => 'zombies'
-# });
+# DevTools - Development-only utilities
+# Sprinkled 'say' statements with module + line for tracing during data churn
+# Dumper outputs are gated behind debug flag
 
 sub chunk {
-    my ($hashref, $size) = @_;
-    $size ||= 5;
+    my ($data, $count) = @_;
+    $count ||= 5;
 
-    my @keys = (keys %$hashref)[0 .. ($size - 1)];
-    my %chunked = map { $_ => $hashref->{$_} } @keys;
+    say "[DevTools:".__LINE__."] \$count => $count";
 
-    return \%chunked;
-}
-
-
-sub print_cache_summary {
-    my ($labels_ref) = @_;
-    Logger::info("\n--- Cache Summary ---");
-
-    foreach my $desc (sort keys %$labels_ref) {
-        my $label = $labels_ref->{$desc};
-        my ($data, $file) = Utils::load_cache($label);
-
-        if ($data) {
-            my $count = (ref $data eq 'HASH') ? scalar(keys %$data)
-                      : (ref $data eq 'ARRAY') ? scalar(@$data)
-                      : 1;
-            Logger::info("[DEV] $desc : loaded from cache -> $file ($count entries)");
-        }
-        else {
-            Logger::info("[DEV] $desc : not used");
-        }
+    unless (ref($data) eq 'HASH' || ref($data) eq 'ARRAY') {
+        Logger::warn("[DEV] chunk() called with non-reference data");
+        return $data;
     }
+
+    my $type = ref $data;
+    my $result;
+
+    if ($type eq 'HASH') {
+        my @keys = keys %$data;
+        my @selected = @keys[0 .. ($count - 1 < $#keys ? $count - 1 : $#keys)];
+        $result = { map { $_ => $data->{$_} } @selected };
+
+        say "[DevTools:".__LINE__."] Hash keys selected => " . join(", ", @selected);
+    }
+    elsif ($type eq 'ARRAY') {
+        my @selected = @$data[0 .. ($count - 1 < $#$data ? $count - 1 : $#$data)];
+        $result = \@selected;
+
+        say "[DevTools:".__LINE__."] Array count selected => " . scalar @selected;
+    }
+
+    if ($ENV{DEBUG}) {
+        say "[DevTools:".__LINE__."] Dumper output for \$result:";
+        say Dumper($result);
+    }
+
+    return $result;
 }
 
-# Internal helper to match Utils.pm counting style
-sub _count_entries {
-    my ($data) = @_;
-    return (ref $data eq 'HASH') ? scalar keys %$data
-         : (ref $data eq 'ARRAY') ? scalar @$data
-         : 1;
-}
 1;

@@ -1,10 +1,12 @@
-package Logger;
-
 use common::sense;
+use Data::Dumper;
+
+use lib 'lib';
 use Term::ANSIColor;
 use File::Spec;
 use File::Path qw(make_path);
-use Data::Dumper;
+package Logger;
+
 
 my $log_fh;
 my $log_file;
@@ -21,6 +23,7 @@ my %color_scheme_light = (
     SUCCESS => 'green',
     DEV     => 'blue',
 );
+
 
 my %color_scheme_dark = (
     INFO    => 'bright_white',

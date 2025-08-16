@@ -1,14 +1,13 @@
 #!/usr/bin/env perl
-
 use common::sense;
-use Getopt::Long qw(:config bundling);
-use File::Path   qw(make_path);
-use File::Spec;
-use POSIX qw(strftime);
-use JSON;
-use File::Slurp;
 use Data::Dumper;
-use String::ShellQuote qw(shell_quote);
+use File::Path;
+use File::Slurp;
+use File::Spec;
+use Getopt::Long;
+use JSON;
+use POSIX qw(strftime);
+use String::ShellQuote;
 
 use lib 'lib';
 use FileLocator;
@@ -19,7 +18,6 @@ use Utils;
 use Logger;
 use DevTools;
 
-# --- Usage ---
 sub usage {
   print <<"EOF";
 Usage: $0 [options]
@@ -72,7 +70,6 @@ Utils::ensure_directories(\%opts);
 my $color_schema = Utils::load_color_schema($opts{dark_mode});
 
 
-# After GetOptions and before doing any cache loads
 if ($opts{'dev-mode'}) {
     say "\e[33;1m[DEV] Developer mode active — results may be truncated for speed!\e[0m";
 }
@@ -83,86 +80,50 @@ Logger::init(\%opts);
 
 # --- Locate Torrents ---
 my @all_t = FileLocator::locate_l_torrents(\%opts);
+say "[torrent_fixer.pl:86] variable dump:";
 
 
 # --- Load QBittorrent ---
+say "[torrent_fixer.pl:89] variable dump:";
 my $qb             = QBittorrent->new(%opts);
+say "[torrent_fixer.pl:90] variable dump:";
+Logger::debug("[MAIN] qb after new: " . Dumper($qb));
+Logger::debug("[MAIN] qb ref type: " . ref($qb));
 my $qbt_loaded_tor = $qb->get_torrents_infohash();
 
+# --- load Zombies ---
+Logger::debug("[MAIN] qb object before passing to ZombieManager: " . Dumper($qb));
+say "[torrent_fixer.pl:96] variable dump:";
+my $zm = ZombieManager->new(qb => $qb);
+say "[torrent_fixer.pl:97] variable dump:";
+my $zombies = $zm->prepare_zombies(\%opts);
 
 # --- Extract Metadata (try cache first) ---
 my ($parsed_torrents,   $parsed_file)   = Utils::load_cache('parsed');
+say "[torrent_fixer.pl:101] variable dump:";
 my ($dupes_by_infohash, $dupes_file)    = Utils::load_cache('dupes');
+say "[torrent_fixer.pl:102] variable dump:";
 my ($problem_torrents,  $problems_file) = Utils::load_cache('problems');
+say "[torrent_fixer.pl:103] variable dump:";
 
 unless ($parsed_torrents && $dupes_by_infohash && $problem_torrents)
 {
+say " we need to remove this!";
   Logger::warn("[WARN] Missing one or more caches — computing from scratch");
   my $parser = TorrentParser->new(%opts);
+say "[torrent_fixer.pl:109] variable dump:";
   $parsed_torrents = $parser->extract_metadata(\@all_t, \%opts);
   Utils::write_cache($dupes_by_infohash, 'dupes');
+say "[torrent_fixer.pl:111] variable dump:";
   Utils::write_cache($problem_torrents,  'problems');
+say "[torrent_fixer.pl:112] variable dump:";
 }
 
 my @torrents_extracted_successfully = values %$parsed_torrents;
 say "109 \t" .  scalar(@torrents_extracted_successfully) ;
 
-# --- Zombie Detection ---
-my $zm = ZombieManager->new(qb => $qb);
+
 my $result;
-my $zombies;
-my $zombie_file;
-
-
-# Try to load zombies cache
-($zombies, $zombie_file) = Utils::load_cache('zombies');
-
-
-# Ensure zombies is always a hashref, warn if empty
-$zm->{zombies} = ($zombies && %$zombies)
-    ? $zombies
-    : do {
-        Logger::warn("[WARN] No zombies loaded, using empty hash");
-        {};
-    };
-
-if ($zombies && %$zombies) {
-    Logger::info("[INFO] zombies cache loaded from $zombie_file (" . scalar(keys %$zombies) . " entries)");
-    if ($opts{dev_mode}) {
-        require DevTools;
-        $zombies = DevTools::chunk($zombies, 5);
-    }
-}
-elsif ($opts{scan_zombies}) {
-    Logger::warn("[WARN] No zombie cache found.");
-    Logger::warn("[WARN]\tAttempting to scan qBittorrent cache for zombies (wiggle:$opts{wiggle}m)");
-    $zombies = $zm->scan_full(\%opts);
-    Utils::write_cache($zombies, 'zombies') if $zombies && %$zombies;
-    if ($opts{dev_mode}) {
-        require DevTools;
-        Logger::warn("[DEV] Chunking zombies list to first 5 entries for faster dev runs");
-        $zombies = DevTools::chunk($zombies, 5);
-    }
-}
-else {
-    Logger::warn("[WARN] No zombie cache found and --scan-zombies not specified — skipping zombie matching.");
-    # Skip matching entirely if no cache and no scan requested
-    goto ZOMBIE_DONE;
-}
-
-
-# Attempt to gather some filesystem metadata on zombies
-my $mdls_results = Utils::get_mdls($parsed_torrents);
-die "[MDLS] Full metadata pull complete — exiting early.\n";
-
-# At this point, $zombies should be populated either from cache or scan
-#$result = $zm->match_by_date(\@torrents_extracted_successfully, $opts{wiggle});
-
-
-say "148";
-
-
-
 
 if ($result->{match_count} && $result->{match_count} > 0) {
 
@@ -183,9 +144,9 @@ if ($result->{no_save_path_count} && $result->{no_save_path_count} > 0) {
 }
 
 Utils::write_cache($result->{matches}, 'matches')
+say "[torrent_fixer.pl:139] variable dump:";
     if $result->{matches} && @{$result->{matches}};
 
-ZOMBIE_DONE:
 
 # --- Dev Mode Summary ---
 if ($opts{dev_mode})
