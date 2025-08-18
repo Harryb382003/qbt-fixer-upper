@@ -1,17 +1,21 @@
+package Logger;
+
 use common::sense;
 use Data::Dumper;
 
-use lib 'lib';
 use Term::ANSIColor;
 use File::Spec;
 use File::Path qw(make_path);
-package Logger;
 
+use lib 'lib';
 
 my $log_fh;
 my $log_file;
 my $verbose = 0;
 our $opts = {};
+
+# Buffers
+my @SUMMARY_BUFFER;
 
 # Define two palettes
 my %color_scheme_light = (
@@ -23,7 +27,6 @@ my %color_scheme_light = (
     SUCCESS => 'green',
     DEV     => 'blue',
 );
-
 
 my %color_scheme_dark = (
     INFO    => 'bright_white',
@@ -37,10 +40,9 @@ my %color_scheme_dark = (
 
 my %active_colors;
 
-
 sub init {
-	Logger::debug("#	init");
-     my ($opts) = @_;
+    Logger::debug("#	init");
+    my ($opts) = @_;
     $Logger::opts = $opts;
 
     # Pick color scheme based on dark mode flag
@@ -52,10 +54,10 @@ sub init {
 
     # If invert-colors flag is set, swap the schemes
     if ($opts->{invert_colors}) {
-    %active_colors = ($opts->{dark_mode})
-        ? %color_scheme_light
-        : %color_scheme_dark;
-}
+        %active_colors = ($opts->{dark_mode})
+            ? %color_scheme_light
+            : %color_scheme_dark;
+    }
 
     # Make sure log dir exists
     my $log_dir = $opts->{log_dir} || '.';
@@ -65,7 +67,10 @@ sub init {
     open($log_fh, '>', $log_file) or die "Cannot open log file $log_file: $!";
 }
 
-sub _log {
+sub _log {# Ensure some palette exists even if init() not called yet
+    if (!%active_colors) {
+        %active_colors = %color_scheme_light;
+    }
     my ($level, @messages) = @_;
     my $timestamp = scalar localtime;
 
@@ -74,7 +79,6 @@ sub _log {
     my $max_lines = 10;  # truncate console output
 
     foreach my $msg (@messages) {
-
         my $console_msg = $msg; # what goes to the screen
         my $file_msg    = $msg; # what goes to the log file
 
@@ -83,17 +87,14 @@ sub _log {
             local $Data::Dumper::Indent   = 1;
             local $Data::Dumper::Sortkeys = 1;
 
-            # For DEBUG/TRACE, only dump if explicitly allowed
             if ($level !~ /^(DEBUG|TRACE)$/ || $dump_ok) {
-                $file_msg    = Dumper($msg);       # always full in log
-                $console_msg = Dumper($msg);       # might get truncated below
-            }
-            else {
+                $file_msg    = Dumper($msg);
+                $console_msg = Dumper($msg);
+            } else {
                 $file_msg    = sprintf("[ref: %s]", ref $msg);
                 $console_msg = $file_msg;
             }
 
-            # Truncate console output unless dump_debug is set
             unless ($dump_ok) {
                 my @lines = split /\n/, $console_msg;
                 if (@lines > $max_lines) {
@@ -102,10 +103,8 @@ sub _log {
             }
         }
 
-        # Console output (with color)
         print color($color) . "[$level] $console_msg" . color('reset') . "\n";
 
-        # Always log to file without colors, full version
         if ($log_fh) {
             print $log_fh "[$timestamp] [$level] $file_msg\n";
         }
@@ -113,7 +112,7 @@ sub _log {
 }
 
 sub _timestamp {
-	Logger::debug("#	_timestamp");
+    Logger::debug("#	_timestamp");
     my @t = localtime();
     return sprintf("%02d-%02d-%02d %02d:%02d:%02d",
         $t[5]+1900, $t[4]+1, $t[3], $t[2], $t[1], $t[0]);
@@ -127,7 +126,7 @@ sub debug   { _log("DEBUG",   shift) if $verbose >= 2; }
 sub trace   { _log("TRACE",   shift) if $verbose >= 3; }
 sub success { _log("SUCCESS", shift); }
 sub dev {
-	Logger::debug("#	dev");
+    Logger::debug("#	dev");
     my ($msg) = @_;
     return unless $opts->{dev_mode};
     info("[DEV] $msg");
@@ -135,7 +134,7 @@ sub dev {
 
 # Log used CLI options
 sub log_used_opts {
-	Logger::debug("#	log_used_opts");
+    Logger::debug("#	log_used_opts");
     my ($used) = @_;
     return unless $used && ref $used eq 'HASH';
 
@@ -161,6 +160,22 @@ sub log_used_opts {
             Logger::info(sprintf("  %-15s : %s", $key, $formatted_val));
         }
     }
+}
+
+# --- Summary Buffer ---
+sub summary {
+    my ($msg) = @_;
+    push @SUMMARY_BUFFER, $msg;
+}
+
+sub flush_summary {
+    return unless @SUMMARY_BUFFER;
+
+    print "\n--- Summary ---\n";
+    foreach my $line (@SUMMARY_BUFFER) {
+        print "[SUMMARY] $line\n";
+    }
+    @SUMMARY_BUFFER = ();
 }
 
 1;
