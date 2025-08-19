@@ -21,6 +21,7 @@ use Utils qw(start_timer stop_timer sprinkle);
 our @EXPORT_OK = qw(
     extract_metadata
     match_by_date
+    process_all_buckets
 );
 
 my $CACHE_FILE = "cache/hash_cache.json";
@@ -55,10 +56,6 @@ sub extract_metadata {
     my ($self) = @_;
     my $opts          = $self->{opts};
     my $torrent_files = $self->{all_torrents};
-
-    say "[TorrentParser line " . __LINE__ . "] got " . scalar(@$torrent_files) . " torrents"
-        if $opts->{dev_mode};
-
     my %parsed_torrents;
     my %bucket_counts;
     my %seen;    # fast infohash lookup
@@ -162,5 +159,64 @@ sub report_bucket_distribution {
 
     say ""; # Blank line for separation in logs
 }
+
+sub _process_bucket {
+    my ($parsed, $bucket, $opts) = @_;
+    my $dev_mode = $opts->{dev_mode};
+
+    # Collect torrents in this bucket
+    my @items = grep {
+        ref($parsed->{$_}) eq 'HASH'
+          && $parsed->{$_}{bucket}
+          && $parsed->{$_}{bucket} eq $bucket
+    } keys %$parsed;
+
+    if (!@items) {
+        Logger::info("[BUCKET] '$bucket' is empty, skipping.");
+        return;
+    }
+
+    my $chunk = $dev_mode ? 5 : scalar @items;
+    Logger::info("[BUCKET] Processing '$bucket' with " . scalar(@items) . " torrents (chunk=$chunk)");
+
+    # Always do first batch
+    my @batch = splice(@items, 0, $chunk);
+    foreach my $ih (@batch) {
+        my $torrent = $parsed->{$ih};
+        Logger::info("[BUCKET:$bucket] Would load into API: $torrent->{source_path}");
+    }
+    Logger::info("[BUCKET:$bucket] Completed batch of " . scalar(@batch). "\n");
+
+    return if $dev_mode;  # stop after first batch in dev mode
+
+    # Otherwise process all
+    while (@items) {
+        my @next_batch = splice(@items, 0, $chunk);
+        foreach my $ih (@next_batch) {
+            my $torrent = $parsed->{$ih};
+            Logger::info("[BUCKET:$bucket] Would load into API: $torrent->{source_path}");
+        }
+        Logger::info("[BUCKET:$bucket] Completed batch of " . scalar(@next_batch) . "\n");
+    }
+}
+
+sub process_all_buckets {
+    my ($parsed, $opts) = @_;
+    my @priority_order = qw(
+        completed_torrents
+        bt_backup
+        downloaded_torrents
+        kitchen_sink
+    );
+
+    foreach my $bucket (@priority_order) {
+        _process_bucket($parsed, $bucket, $opts);
+    }
+}
+
+
+
+
+
 
 1;
