@@ -63,7 +63,9 @@ sub extract_metadata {
     my %bucket_uniques;
     my %bucket_dupes;
     my %colliders;
+    my $intra_dupe_count = 0;
     my $rename_count     = 0;
+    my $collision_count  = 0;
 
     foreach my $file_path (@files) {
         Logger::debug("[TorrentParser] Processing $file_path");
@@ -87,7 +89,7 @@ sub extract_metadata {
         };
 
         # --- Compute infohash ---
-        my $infohash     = sha1_hex(Bencode::bencode($info->{info}));
+        my $infohash = sha1_hex(Bencode::bencode($info->{info}));
         my $torrent_name = $info->{info}{name} // basename($file_path);
 
         # --- Bucket assignment ---
@@ -106,12 +108,7 @@ sub extract_metadata {
                 \%colliders,
             );
             $rename_count++ if $normalized_path ne $file_path;
-        }
-
-        # --- Dupe handling ---
-        if (exists $seen{$infohash}) {
-            $bucket_dupes{$bucket}++;
-            next;
+            $collision_count++ if $colliders->{_last_collision};
         }
 
         # --- Build metadata ---
@@ -131,6 +128,13 @@ sub extract_metadata {
             comment     => $info->{comment}  // '',
         };
 
+        # --- Dupe / authoritative handling ---
+        if (exists $seen{$infohash}) {
+            $intra_dupe_count++;
+            $bucket_dupes{$bucket}++;
+            next;
+        }
+
         $seen{$infohash} = 1;
         $parsed_by_infohash{$infohash} = $metadata;
         push @{ $parsed_by_bucket{$bucket} }, $metadata;
@@ -144,25 +148,30 @@ sub extract_metadata {
     }
 
     # --- Summary reporting ---
-    Logger::summary("[SUMMARY] Bucket distribution:");
+    Logger::summary("[SUMMARY] Unique torrents kept:\t\t" . scalar keys %parsed_by_infohash);
+    Logger::summary("[SUMMARY] Torrents renamed (normalize):\t$rename_count");
+    Logger::summary("[SUMMARY] Collisions flagged:\t$collision_count");
+    Logger::summary("[SUMMARY] Intra-bucket dupes flagged:\t$intra_dupe_count");
+    Logger::summary("[SUMMARY] by_infohash count\t\t\t" . scalar keys %parsed_by_infohash);
+
+    Logger::summary("[SUMMARY] [BUCKETS]");
     for my $bucket (sort keys %bucket_uniques) {
         my $u = $bucket_uniques{$bucket} // 0;
         my $d = $bucket_dupes{$bucket}   // 0;
         my $t = $u + $d;
         Logger::summary(
-            sprintf("   %-20s total=%d, uniques=%d, dupes=%d", $bucket, $t, $u, $d));
+            sprintf("   %-20s total=%d, uniques=%d, dupes=%d",
+                $bucket, $t, $u, $d));
     }
-    my $bucket_total = 0;
-        $bucket_total += $_ for values %bucket_uniques;
-        $bucket_total += $_ for values %bucket_dupes;
 
-Logger::summary("[SUMMARY] [SUMMARY] Bucket distribution, total:\t$bucket_total");
     return {
         by_infohash => \%parsed_by_infohash,
         by_bucket   => \%parsed_by_bucket,
         uniques     => \%bucket_uniques,
         dupes       => \%bucket_dupes,
         renamed     => $rename_count,
+        collisions  => $collision_count,
+        intra_dupes => $intra_dupe_count,
     };
 }
 

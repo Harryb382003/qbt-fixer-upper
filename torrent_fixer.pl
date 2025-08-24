@@ -157,24 +157,6 @@ my $tp = TorrentParser->new(
       });
 
 my $l_parsed = $tp->extract_metadata;
-Logger::summary("[SUMMARY] Unique torrents kept:\t\t"
-    . scalar keys %{ $l_parsed->{by_infohash} });
-
-Logger::summary("[SUMMARY] Torrents renamed (normalize):\t"
-    . $l_parsed->{renamed});
-
-
-my $bucket_counts = $l_parsed->{counts};
-my $total_buckets = 0; $total_buckets += $_ for values %$bucket_counts;
-
-# Logger::info("[DEBUG] extract_metadata returned keys: "
-#     . join(", ", keys %$l_parsed));
-Logger::summary("[SUMMARY] by_infohash count\t\t\t"
-  . (exists $l_parsed->{by_infohash}
-    ? scalar keys %{$l_parsed->{by_infohash}}
-    : "MISSING"));
-
-
 
 process_all_infohashes($l_parsed, \%opts);
 

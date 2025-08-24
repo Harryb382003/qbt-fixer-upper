@@ -66,30 +66,28 @@ sub normalize_filename {
     use File::Basename qw(basename dirname);
     use File::Copy qw(move);
 
-    my ($meta, $colliders, $opts) = @_;
+    my ($meta, $colliders) = @_;
     my $old_path     = $meta->{source_path};
     my $torrent_name = $meta->{name};
     my $tracker      = $meta->{tracker};
     my $comment      = $meta->{comment};
-    # 🚫 Allow disabling normalization via opts
-    if (!$opts->{normalize}) {
-        Logger::debug("[normalize_filename] Normalization disabled by opts → $old_path");
-        return $old_path;
-    }
 
-    # --- Skip rename if path is under protected buckets
+    # 🚫 Skip rename if path is under protected buckets
     if ($old_path =~ m{/(Completed_torrents|BT_backup|Downloaded_torrents)}i) {
         Logger::debug("[normalize_filename] Protected bucket match, no rename: $old_path");
         return $old_path;
     }
 
-    # --- use torrent_name directly (filesystem safe already)
+    # --- ensure safe filename ---
     my $safe_name = $torrent_name;
     $safe_name .= ".torrent" unless $safe_name =~ /\.torrent$/i;
 
     my $dir      = dirname($old_path);
     my $new_path = "$dir/$safe_name";
     my $base     = basename($new_path);
+
+    # reset collision flag for this run
+    $colliders->{_last_collision} = 0;
 
     # Step 1: Already marked as collider → jump to tracker-prefixed version
     if (exists $colliders->{$base}) {
@@ -105,20 +103,14 @@ sub normalize_filename {
 
         # mark this base as a collider
         $colliders->{$base} = 1;
+        $colliders->{_last_collision} = 1;   # 🚩 flag back to extract_metadata
 
         # retry with tracker/comment prefix
         my $prefixed = _prepend_tracker($tracker, $comment, $safe_name);
         my $prefixed_path = "$dir/$prefixed";
 
         if (-e $prefixed_path) {
-            Logger::warn("[normalize_filename] Tracker-prefixed target also
-                exists: $prefixed_path — MANUAL REVIEW REQUIRED");
-            $colliders->{manual}{$base} = {
-                original => $old_path,
-                target   => $prefixed_path,
-                tracker  => $tracker,
-                comment  => $comment,
-            };
+            Logger::warn("[normalize_filename] Tracker-prefixed target also exists: $prefixed_path — skipping rename");
             return $old_path;
         }
 
@@ -134,7 +126,7 @@ sub normalize_filename {
     # Step 3: No collision, safe to rename
     if ($old_path ne $new_path) {
         if (move($old_path, $new_path)) {
-            Logger::info("[normalize_filename] Renamed (clean) $old_path → $new_path");
+            Logger::info("[normalize_filename] Renamed: $old_path → $new_path");
             return $new_path;
         } else {
             Logger::warn("[normalize_filename] Failed to rename $old_path → $new_path: $!");
@@ -145,6 +137,7 @@ sub normalize_filename {
     # Step 4: Nothing to do
     return $old_path;
 }
+
 
 # --- helper for tracker/comment prepend ---
 # sub _prepend_tracker {
