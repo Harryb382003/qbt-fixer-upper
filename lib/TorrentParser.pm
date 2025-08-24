@@ -237,22 +237,24 @@ sub process_all_infohashes {
 sub _assign_bucket {
     my ($path, $opts) = @_;
 
-    # Completed torrents
+    # Check against each configured export_dir_fin
     for my $cdir (@{ $opts->{export_dir_fin} }) {
-        return 'completed_torrents' if index($path, $cdir) != -1;
+        if (index($path, $cdir) != -1) {
+            return basename($cdir);  # dynamic bucket name
+        }
     }
 
+    # Check against each configured export_dir
     for my $ddir (@{ $opts->{export_dir} }) {
-        return 'downloaded_torrents' if index($path, $ddir) != -1;
+        if (index($path, $ddir) != -1) {
+            return basename($ddir);  # dynamic bucket name
+        }
     }
 
-    # BT_backup (hardcoded, qBittorrent always makes this dir)
-    if ($path =~ /BT_backup/) {
-        say __LINE__ . " matched BT_backup";
-        return 'bt_backup';
-    }
+    # BT_backup (hardcoded, qBittorrent internal)
+    return 'BT_backup' if $path =~ /BT_backup/;
 
-    say __LINE__ . " fell through to kitchen_sink: $path";
+    # Default fallback
     return 'kitchen_sink';
 }
 

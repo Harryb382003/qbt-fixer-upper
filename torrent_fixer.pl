@@ -86,33 +86,7 @@ $opts{wiggle} //= 10;
 Logger::init(\%opts);
 Logger::info("Logger initialized");
 
-# --- Cache Orchestration ---
-# Preload all known caches en masse to pass into managers
-# This ensures single load + clear flow, but still allows modules
-# to lazy-load if called outside main.
 
-# --- This was an exercise in futility
-# --- Leaving code in place a reminder to stay out of the weeds
-# ---   or off the weed as the case may be!
-
-# # # # Logger::info("Loading caches...");
-
-# # # # my %caches;
-# # # # foreach my $type (qw(parsed dupes zombies problems)) {
-# # # #     my ($cache, $file, $err) = Utils::load_cache($type);
-# # # #
-# # # #     if ($cache) {
-# # # #         my $count = (ref($cache) eq 'HASH') ? scalar(keys %$cache) : scalar(@$cache);
-# # # #         Logger::info("[CACHE] Loaded '$type' cache ($count entries) from $file");
-# # # #     }
-# # # #     else {
-# # # #         Logger::warn("[CACHE] No '$type' cache available ($err)") if $err;
-# # # #     }
-# # # #
-# # # #     $caches{$type} = $cache; # store undef if it failed, keeps shape consistent
-# # # # }
-# # # #
-# # # # Logger::info("Cache preload complete — handing off to managers");
 
 # --- Main logic placeholder ---
 Logger::info("[MAIN] Starting processing...");
@@ -134,18 +108,20 @@ Logger::summary("[TORRENTS] Torrent files located\t\t" . scalar(@all_t) );
 my $qb             = QBittorrent->new(\%opts);
 my $prefs = $qb->get_preferences;
 
-# Force into arrayrefs so _assign_bucket is consistent
-$opts{export_dir} = ref $prefs->{export_dir} eq 'ARRAY'
-                      ? $prefs->{export_dir}
-                      : $prefs->{export_dir}
-                      ? [ $prefs->{export_dir} ]
-                      : [];
-
-$opts{export_dir_fin} = ref $prefs->{export_dir_fin}  eq 'ARRAY'
-                          ? $prefs->{export_dir_fin}
-                          : $prefs->{export_dir_fin}
-                          ? [ $prefs->{export_dir_fin} ]
-                          : [];
+# --- Normalize QBT prefs to always be arrayrefs ---
+for my $key (qw(export_dir export_dir_fin)) {
+    if (exists $prefs->{$key}) {
+        if (ref $prefs->{$key} eq 'ARRAY') {
+            $opts{$key} = $prefs->{$key};   # already arrayref
+        }
+        elsif ($prefs->{$key}) {
+            $opts{$key} = [ $prefs->{$key} ]; # wrap scalar into arrayref
+        }
+    }
+    else {
+        $opts{$key} = [];  # default to empty arrayref
+    }
+}
 
 my $qbt_loaded_tor = $qb->get_torrents_infohash();
 
