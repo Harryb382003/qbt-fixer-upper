@@ -3,7 +3,8 @@ package Utils;
 use common::sense;
 use Data::Dumper;
 
-use File::Basename qw(basename);
+use File::Copy qw(move);
+use File::Basename qw(basename dirname);
 use File::Spec;
 use File::Path qw(make_path);
 use File::Slurp qw(read_file write_file);
@@ -59,6 +60,149 @@ sub deep_sort {
     else {
         return $thing;
     }
+}
+
+sub normalize_filename {
+    use File::Basename qw(basename dirname);
+    use File::Copy qw(move);
+
+    my ($meta, $colliders, $opts) = @_;
+    my $old_path     = $meta->{source_path};
+    my $torrent_name = $meta->{name};
+    my $tracker      = $meta->{tracker};
+    my $comment      = $meta->{comment};
+    # 🚫 Allow disabling normalization via opts
+    if (!$opts->{normalize}) {
+        Logger::debug("[normalize_filename] Normalization disabled by opts → $old_path");
+        return $old_path;
+    }
+
+    # --- Skip rename if path is under protected buckets
+    if ($old_path =~ m{/(Completed_torrents|BT_backup|Downloaded_torrents)}i) {
+        Logger::debug("[normalize_filename] Protected bucket match, no rename: $old_path");
+        return $old_path;
+    }
+
+    # --- use torrent_name directly (filesystem safe already)
+    my $safe_name = $torrent_name;
+    $safe_name .= ".torrent" unless $safe_name =~ /\.torrent$/i;
+
+    my $dir      = dirname($old_path);
+    my $new_path = "$dir/$safe_name";
+    my $base     = basename($new_path);
+
+    # Step 1: Already marked as collider → jump to tracker-prefixed version
+    if (exists $colliders->{$base}) {
+        my $prefixed = _prepend_tracker($tracker, $comment, $safe_name);
+        my $prefixed_path = "$dir/$prefixed";
+        Logger::warn("[normalize_filename] $base already marked collider → using $prefixed_path");
+        return $prefixed_path;
+    }
+
+    # Step 2: Actual filesystem collision
+    if (-e $new_path && $old_path ne $new_path) {
+        Logger::warn("\n[normalize_filename] COLLISION: $old_path → $new_path");
+
+        # mark this base as a collider
+        $colliders->{$base} = 1;
+
+        # retry with tracker/comment prefix
+        my $prefixed = _prepend_tracker($tracker, $comment, $safe_name);
+        my $prefixed_path = "$dir/$prefixed";
+
+        if (-e $prefixed_path) {
+            Logger::warn("[normalize_filename] Tracker-prefixed target also
+                exists: $prefixed_path — MANUAL REVIEW REQUIRED");
+            $colliders->{manual}{$base} = {
+                original => $old_path,
+                target   => $prefixed_path,
+                tracker  => $tracker,
+                comment  => $comment,
+            };
+            return $old_path;
+        }
+
+        if (move($old_path, $prefixed_path)) {
+            Logger::info("[normalize_filename] Renamed (collider) $old_path → $prefixed_path");
+            return $prefixed_path;
+        } else {
+            Logger::warn("[normalize_filename] Failed to rename collider $old_path → $prefixed_path: $!");
+            return $old_path;
+        }
+    }
+
+    # Step 3: No collision, safe to rename
+    if ($old_path ne $new_path) {
+        if (move($old_path, $new_path)) {
+            Logger::info("[normalize_filename] Renamed (clean) $old_path → $new_path");
+            return $new_path;
+        } else {
+            Logger::warn("[normalize_filename] Failed to rename $old_path → $new_path: $!");
+            return $old_path;
+        }
+    }
+
+    # Step 4: Nothing to do
+    return $old_path;
+}
+
+# --- helper for tracker/comment prepend ---
+# sub _prepend_tracker {
+#     my ($tracker, $comment, $filename) = @_;
+#
+#     my $prefix = "";
+#     if ($tracker) {
+#         $tracker =~ s{https?://}{};
+#         $tracker =~ s{/.*$}{};
+#         $tracker =~ s/[^\w\-\.]+/_/g;
+#         $prefix = $tracker;
+#     }
+#
+#     if ($comment && $comment =~ /(\d{6,})/) {
+#         $prefix .= " - $1";
+#     }
+#
+#     return $prefix ? "[$prefix] - $filename" : $filename;
+# }
+
+# --- helper ---
+sub _prepend_tracker {
+    my ($tracker, $comment, $filename) = @_;
+
+    my $prefix;
+    if ($tracker) {
+        $prefix = _shorten_tracker($tracker);
+    } elsif ($comment && $comment =~ m{https?://([^/]+)}) {
+        $prefix = _shorten_tracker($1);
+    }
+
+    return $filename unless $prefix;
+    return "[$prefix] - $filename";
+}
+
+sub _shorten_tracker {
+    my ($url) = @_;
+    return '' unless $url;
+
+    # Extract hostname
+    my $host;
+    if ($url =~ m{https?://([^/:]+)}) {
+        $host = $1;
+    } else {
+        $host = $url;  # fallback
+    }
+
+    # Strip leading "tracker."
+    $host =~ s/^tracker\.//i;
+
+    # Take the first meaningful label
+    my @parts = split(/\./, $host);
+    my $short = $parts[0] // $host;
+
+    # Uppercase
+    $short = uc $short;
+
+    return $short;
 }
 
 # ---------------------------
@@ -236,6 +380,79 @@ sub compute_infohash {
 
     return $hash;
 }
+
+sub derive_qbt_context {
+    my ($torrent_path) = @_;
+    my ($vol, $dir, $file) = File::Spec->splitpath($torrent_path);
+
+    my $save_path  = $dir;  # fallback: directory where the .torrent was found
+    my $category   = "";
+
+    # Infer category from directory naming
+    if ($dir =~ /DUMP/i) {
+        $category = "DUMP";
+    }
+    elsif ($dir =~ /FREELEECH/i) {
+        $category = "_FREELEECH";
+    }
+    elsif ($dir =~ /UNREGISTERED/i) {
+        $category = "UNREGISTERED";
+    }
+
+    return ($save_path, $category);
+}
+
+sub sanity_check_payload {
+    my ($meta, $save_path, $bucket) = @_;
+    my @issues;
+    my $valid = 1;
+
+    foreach my $file (@{ $meta->{files} }) {
+        my $path = File::Spec->catfile($save_path, $file->{path});
+        if (!-e $path) {
+            push @issues, "missing:$path";
+            $valid = 0;
+            next;
+        }
+
+        my $size_fs = -s $path;
+        my $size_meta = $file->{length};
+
+        if ($size_fs != $size_meta) {
+            # 0-byte allowance
+            if ($size_fs == 0) {
+                push @issues, "zero_byte:$path";
+            } else {
+                push @issues, "size_mismatch:$path ($size_fs != $size_meta)";
+                $valid = 0;
+            }
+        }
+    }
+
+    # Special rule: DUMP bucket completion threshold
+    if ($bucket eq 'dump') {
+        my $total_bytes = $meta->{length};
+        my $have_bytes  = 0;
+        foreach my $file (@{ $meta->{files} }) {
+            my $path = File::Spec->catfile($save_path, $file->{path});
+            $have_bytes += (-e $path ? (-s $path) : 0);
+        }
+        my $completion = $total_bytes ? ($have_bytes / $total_bytes) : 0;
+
+        # 1% per GB rule
+        my $threshold = ($total_bytes / (1024*1024*1024)) * 0.01;
+        if ($completion < $threshold) {
+            push @issues, "below_threshold: " . sprintf("%.2f%% < %.2f%%", $completion*100, $threshold*100);
+            $valid = 0;
+        }
+    }
+
+    return {
+        valid  => $valid,
+        issues => \@issues,
+    };
+}
+
 
 # ---------------------------
 # MacOS utilities

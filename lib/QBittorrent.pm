@@ -102,6 +102,70 @@ sub get_torrent_files {
     return $files;
 }
 
+sub add_torrent {
+    my ($self, $torrent_path, $save_path, $category) = @_;
+
+    unless (-f $torrent_path) {
+        Logger::error("[QBT] Torrent file not found: $torrent_path");
+        return 0;
+    }
+
+    Logger::info("[QBT] Would add torrent: $torrent_path");
+
+    # ✅ In dev_mode → just log, don’t hit API
+    return 1 if $self->{opts}{dev_mode};
+
+    # --- Live API call ---
+    my $res = $self->{ua}->post(
+        "$self->{base_url}/api/v2/torrents/add",
+        Content_Type => 'form-data',
+        Content      => [
+            torrents  => [$torrent_path],   # local .torrent file
+            savepath  => $save_path // "",  # optional
+            category  => $category  // "",  # optional (e.g. DUMP)
+            paused    => "true",            # load paused (your QBT config matches)
+        ]
+    );
+
+    if ($res->is_success) {
+        Logger::info("[QBT] Added torrent via API: $torrent_path");
+        return 1;
+    } else {
+        Logger::error("[QBT] Failed to add torrent: $torrent_path (" . $res->status_line . ")");
+        return 0;
+    }
+}
+
+sub force_recheck {
+    my ($infohash) = @_;
+    Logger::info("[QBT] Would force recheck: $infohash");
+    return 1;
+}
+
+sub get_torrent_info {
+    my ($infohash) = @_;
+    Logger::info("[QBT] Would fetch torrent info: $infohash");
+    # Return a dummy structure
+    return {
+        infohash   => $infohash,
+        progress   => 0.42,   # 42% complete
+        size_bytes => 5_000_000_000, # 5 GB
+        category   => undef,
+        state      => "paused",
+    };
+}
+
+sub delete_torrent {
+    my ($infohash, $with_data) = @_;
+    Logger::info("[QBT] Would delete torrent: $infohash (with_data=" . ($with_data ? "YES" : "NO") . ")");
+    return 1;
+}
+
+sub get_free_space {
+    my ($path) = @_;
+    Logger::info("[QBT] Would check free space at: $path");
+    return 500 * 1024 * 1024 * 1024; # pretend 500 GB free
+}
 
 sub get_q_zombies {
 	Logger::debug("#	get_q_zombies");
