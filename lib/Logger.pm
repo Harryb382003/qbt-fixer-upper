@@ -173,9 +173,19 @@ sub flush_summary {
 
     print "\n--- Summary ---\n";
     foreach my $line (@SUMMARY_BUFFER) {
-        print "[SUMMARY] $line\n";
+        if ( $line =~ /^\n+/ ) {
+            print "$line\n";
+        } else {
+            print "[SUMMARY] $line\n";
+        }
+
     }
     @SUMMARY_BUFFER = ();
+}
+
+sub raw {
+    my ($msg) = @_;
+    print $msg, "\n";  # bypass preambles completely
 }
 
 1;

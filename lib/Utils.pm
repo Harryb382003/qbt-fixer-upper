@@ -3,6 +3,7 @@ package Utils;
 use common::sense;
 use Data::Dumper;
 
+
 use File::Copy qw(move);
 use File::Basename qw(basename dirname);
 use File::Spec;
@@ -13,7 +14,6 @@ use Digest::SHA qw(sha1_hex);
 use JSON qw(decode_json encode_json);
 
 use lib 'lib';
-
 use Logger;
 
 use Exporter 'import';
@@ -63,9 +63,6 @@ sub deep_sort {
 }
 
 sub normalize_filename {
-    use File::Basename qw(basename dirname);
-    use File::Copy qw(move);
-
     my ($meta, $colliders) = @_;
     my $old_path     = $meta->{source_path};
     my $torrent_name = $meta->{name};

@@ -17,6 +17,7 @@ use QBittorrent;
 use TorrentParser qw(
   extract_metadata
   process_all_infohashes
+  report_collision_groups
 );
 use ZombieManager;
 use Utils qw(sprinkle);
@@ -133,6 +134,9 @@ my $tp = TorrentParser->new(
       });
 
 my $l_parsed = $tp->extract_metadata;
+report_collision_groups($l_parsed->{collisions});
+
+
 
 process_all_infohashes($l_parsed, \%opts);
 

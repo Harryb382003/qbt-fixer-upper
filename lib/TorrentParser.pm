@@ -22,6 +22,7 @@ our @EXPORT_OK = qw(
     extract_metadata
     match_by_date
     process_all_infohashes
+    report_collision_groups
 );
 
 my $CACHE_FILE = "cache/hash_cache.json";
@@ -62,7 +63,7 @@ sub extract_metadata {
     my %parsed_by_bucket;
     my %bucket_uniques;
     my %bucket_dupes;
-    my %colliders;
+    my %colliders;            # filename → [ list of paths ]
     my $intra_dupe_count = 0;
     my $rename_count     = 0;
     my $collision_count  = 0;
@@ -89,27 +90,11 @@ sub extract_metadata {
         };
 
         # --- Compute infohash ---
-        my $infohash = sha1_hex(Bencode::bencode($info->{info}));
+        my $infohash     = sha1_hex(Bencode::bencode($info->{info}));
         my $torrent_name = $info->{info}{name} // basename($file_path);
 
         # --- Bucket assignment ---
         my $bucket = _assign_bucket($file_path, $opts);
-
-        # --- Normalization (optional) ---
-        my $normalized_path = $file_path;
-        if ($opts->{normalize}) {
-            $normalized_path = Utils::normalize_filename(
-                {
-                    source_path => $file_path,
-                    name        => $torrent_name,
-                    tracker     => $info->{announce} // '',
-                    comment     => $info->{comment}  // '',
-                },
-                \%colliders,
-            );
-            $rename_count++ if $normalized_path ne $file_path;
-            $collision_count++ if $colliders->{_last_collision};
-        }
 
         # --- Build metadata ---
         my $metadata = {
@@ -121,7 +106,7 @@ sub extract_metadata {
             total_size  => $info->{files}
                              ? sum(map { $_->{length} || 0 } @{ $info->{files} })
                              : $info->{length} || 0,
-            source_path => $normalized_path,
+            source_path => $file_path,
             bucket      => $bucket,
             private     => $info->{private} ? 'Yes' : 'No',
             tracker     => $info->{announce} // '',
@@ -135,34 +120,22 @@ sub extract_metadata {
             next;
         }
 
+        # Torrent survives dedupe
         $seen{$infohash} = 1;
         $parsed_by_infohash{$infohash} = $metadata;
         push @{ $parsed_by_bucket{$bucket} }, $metadata;
         $bucket_uniques{$bucket}++;
+
+        # --- Colliders (kitchen_sink only) ---
+        # --- If %opts{normalize} = true
+        # --- this will determine renaming collisions.
+        if ($bucket eq 'kitchen_sink') {
+            my $base = $torrent_name . ".torrent";
+            push @{ $colliders{$base} }, $file_path;
+        }
     }
 
-    # --- Manual collision log (if any) ---
-    if ($colliders{manual}) {
-        Utils::write_json($colliders{manual}, "logs/manual_collisions.json");
-        Logger::info("[normalize_filename] Wrote manual review list → logs/manual_collisions.json");
-    }
 
-    # --- Summary reporting ---
-    Logger::summary("[SUMMARY] Unique torrents kept:\t\t" . scalar keys %parsed_by_infohash);
-    Logger::summary("[SUMMARY] Torrents renamed (normalize):\t$rename_count");
-    Logger::summary("[SUMMARY] Collisions flagged:\t$collision_count");
-    Logger::summary("[SUMMARY] Intra-bucket dupes flagged:\t$intra_dupe_count");
-    Logger::summary("[SUMMARY] by_infohash count\t\t\t" . scalar keys %parsed_by_infohash);
-
-    Logger::summary("[SUMMARY] [BUCKETS]");
-    for my $bucket (sort keys %bucket_uniques) {
-        my $u = $bucket_uniques{$bucket} // 0;
-        my $d = $bucket_dupes{$bucket}   // 0;
-        my $t = $u + $d;
-        Logger::summary(
-            sprintf("   %-20s total=%d, uniques=%d, dupes=%d",
-                $bucket, $t, $u, $d));
-    }
 
     return {
         by_infohash => \%parsed_by_infohash,
@@ -170,22 +143,23 @@ sub extract_metadata {
         uniques     => \%bucket_uniques,
         dupes       => \%bucket_dupes,
         renamed     => $rename_count,
-        collisions  => $collision_count,
+        collisions => \%colliders,
         intra_dupes => $intra_dupe_count,
     };
 }
-
-
-sub report_colliders_distribution {
+sub report_collision_groups {
     my ($colliders) = @_;
+    my $collision_groups = 0;
 
-    return unless $colliders && %$colliders;
-
-    Logger::info("[Collider Report]");
-    foreach my $base (sort keys %$colliders) {
-        my $count = $colliders->{$base};
-        Logger::info(sprintf("  %-40s → %d collisions", $base, $count));
+    for my $name (sort keys %$colliders) {
+        my $files = $colliders->{$name};
+        if (@$files > 1) {
+            $collision_groups++;
+            Logger::summary("\n[COLLIDER] $name");
+            Logger::summary("    $_") for @$files;
+        }
     }
+    Logger::summary("[SUMMARY] Filename collision groups observed:\t$collision_groups");
 }
 
 sub process_all_infohashes {
@@ -233,7 +207,7 @@ sub process_all_infohashes {
     Logger::info("[MAIN] Finished process_all_infohashes()");
 }
 
-# --- internal helper ---
+# --- internal helpers ---
 sub _assign_bucket {
     my ($path, $opts) = @_;
 
@@ -259,7 +233,63 @@ sub _assign_bucket {
 }
 
 
+
 =pod
+
+
+sub _collision_handler {
+    my ($meta, $opts, $colliders) = @_;
+    return if !$opts->{normalize};   # 🚫 skip silently if switch is off
+
+    my $bucket = $meta->{bucket};
+    my $path   = $meta->{source_path};
+    my $base   = basename($path);
+
+    # init counters once
+    $colliders->{case_study} //= {
+        authoritative_safe      => 0,
+        kitchen_sink_safe       => 0,
+        kitchen_sink_normalized => 0,
+        kitchen_sink_manual     => 0,
+        kitchen_sink_missing    => 0,
+    };
+
+    # --- Authoritative buckets (qBittorrent managed) ---
+    if ($bucket ne 'kitchen_sink') {
+        Logger::summary("[NORMALIZE] Authoritative bucket ($bucket) → safe: $base");
+        $colliders->{case_study}{authoritative_safe}++;
+        return "authoritative_safe";
+    }
+
+    # --- Kitchen sink collisions ---
+    if (-e $path) {
+        my $normalized = Utils::normalize_filename($meta, $colliders);
+
+        if ($normalized ne $path) {
+            if (-e $normalized) {
+                Logger::summary("[NORMALIZE] KS collision escalation failed (target exists) → manual: $normalized");
+                push @{ $colliders->{manual} }, $path;
+                $colliders->{case_study}{kitchen_sink_manual}++;
+                return "kitchen_sink_manual";
+            }
+            Logger::summary("[NORMALIZE] KS collision normalized: $base → $normalized");
+            $colliders->{case_study}{kitchen_sink_normalized}++;
+            return "kitchen_sink_normalized";
+        }
+        else {
+            Logger::summary("[NORMALIZE] KS no collision, safe: $base");
+            $colliders->{case_study}{kitchen_sink_safe}++;
+            return "kitchen_sink_safe";
+        }
+    }
+
+    Logger::summary("[NORMALIZE] KS missing source file → ignored: $base");
+    $colliders->{case_study}{kitchen_sink_missing}++;
+    return "kitchen_sink_missing";
+}
+
+
+
 
 
 # ==========================
