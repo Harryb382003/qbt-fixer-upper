@@ -25,7 +25,11 @@ our @EXPORT_OK = qw(
     get_mdls
     start_timer
     stop_timer
+    normalize_filename
+    normalize_to_arrayref
+    maybe_translate
     sprinkle
+
 );
 
 
@@ -63,16 +67,25 @@ sub deep_sort {
 }
 
 sub normalize_filename {
-    my ($meta, $colliders) = @_;
+
+    my ($meta, $colliders, $opts) = @_;
     my $old_path     = $meta->{source_path};
     my $torrent_name = $meta->{name};
     my $tracker      = $meta->{tracker};
     my $comment      = $meta->{comment};
 
-    # 🚫 Skip rename if path is under protected buckets
-    if ($old_path =~ m{/(Completed_torrents|BT_backup|Downloaded_torrents)}i) {
-        Logger::debug("[normalize_filename] Protected bucket match, no rename: $old_path");
-        return $old_path;
+    #  Skip rename if path is under protected buckets (dynamic, not hardcoded)
+    my @protected = (
+        @{ $opts->{export_dir_fin} || [] },
+        @{ $opts->{export_dir}     || [] },
+    );
+    push @protected, "BT_backup";   # always present, qBittorrent internal
+
+    foreach my $p (@protected) {
+        if (index($old_path, $p) != -1) {
+            Logger::debug("[normalize_filename] Protected bucket match, no rename: $old_path");
+            return $old_path;
+        }
     }
 
     # --- ensure safe filename ---
@@ -96,11 +109,11 @@ sub normalize_filename {
 
     # Step 2: Actual filesystem collision
     if (-e $new_path && $old_path ne $new_path) {
-        Logger::warn("\n[normalize_filename] COLLISION: $old_path → $new_path");
+        Logger::warn("[normalize_filename] COLLISION: $old_path → $new_path");
 
         # mark this base as a collider
         $colliders->{$base} = 1;
-        $colliders->{_last_collision} = 1;   # 🚩 flag back to extract_metadata
+        $colliders->{_last_collision} = 1;
 
         # retry with tracker/comment prefix
         my $prefixed = _prepend_tracker($tracker, $comment, $safe_name);
@@ -111,22 +124,33 @@ sub normalize_filename {
             return $old_path;
         }
 
-        if (move($old_path, $prefixed_path)) {
-            Logger::info("[normalize_filename] Renamed (collider) $old_path → $prefixed_path");
-            return $prefixed_path;
+        if ($opts->{normalize}) {
+            if (move($old_path, $prefixed_path)) {
+                Logger::info("[normalize_filename] Renamed (collider) $old_path → $prefixed_path");
+                return $prefixed_path;
+            } else {
+                Logger::warn("[normalize_filename] Failed to rename collider $old_path → $prefixed_path: $!");
+                return $old_path;
+            }
         } else {
-            Logger::warn("[normalize_filename] Failed to rename collider $old_path → $prefixed_path: $!");
+            Logger::info("[normalize_filename] Would have normalized (collider): $old_path → $prefixed_path (skipped,
+normalize=0)");
             return $old_path;
         }
     }
 
     # Step 3: No collision, safe to rename
     if ($old_path ne $new_path) {
-        if (move($old_path, $new_path)) {
-            Logger::info("[normalize_filename] Renamed: $old_path → $new_path");
-            return $new_path;
+        if ($opts->{normalize}) {
+            if (move($old_path, $new_path)) {
+                Logger::info("[normalize_filename] Renamed: $old_path → $new_path");
+                return $new_path;
+            } else {
+                Logger::warn("[normalize_filename] Failed to rename $old_path → $new_path: $!");
+                return $old_path;
+            }
         } else {
-            Logger::warn("[normalize_filename] Failed to rename $old_path → $new_path: $!");
+            Logger::info("[normalize_filename] Would have normalized: $old_path → $new_path (skipped, normalize=0)");
             return $old_path;
         }
     }
@@ -134,6 +158,27 @@ sub normalize_filename {
     # Step 4: Nothing to do
     return $old_path;
 }
+
+sub normalize_to_arrayref {
+    my $val = shift;
+    return [] unless defined $val;
+    return ref($val) eq 'ARRAY' ? $val : [$val];
+}
+
+# Detect non-ASCII and return placeholder translation
+sub maybe_translate {
+    my ($text) = @_;
+    return "" unless defined $text && $text ne "";
+
+    # Quick ASCII check
+    if ($text =~ /^[\x00-\x7F]+$/) {
+        return $text;  # already plain ASCII
+    }
+
+    # Placeholder: actual translation API/DLL goes here
+    return "[TODO: translate] $text";
+}
+
 
 
 # --- helper for tracker/comment prepend ---
