@@ -163,7 +163,7 @@ sub extract_metadata {
         my $u = $bucket_uniques{$bucket} // 0;
         my $d = $bucket_dupes{$bucket}   // 0;
         my $t = $u + $d;
-        Logger::summary(sprintf("   %-20s total=%d, uniques=%d, dupes=%d",
+        Logger::summary(sprintf("   %-20s  total=%6d  uniques=%6d  dupes=%6d",
             $bucket, $t, $u, $d));
     }
 
