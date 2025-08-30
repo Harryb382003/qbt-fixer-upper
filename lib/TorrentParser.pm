@@ -63,7 +63,7 @@ sub extract_metadata {
     my %parsed_by_bucket;
     my %bucket_uniques;
     my %bucket_dupes;
-    my %colliders;            # filename → [ list of paths ]
+    my %colliders;          # collision tracking
     my $intra_dupe_count = 0;
     my $rename_count     = 0;
     my $collision_count  = 0;
@@ -90,7 +90,7 @@ sub extract_metadata {
         };
 
         # --- Compute infohash ---
-        my $infohash     = sha1_hex(Bencode::bencode($info->{info}));
+        my $infohash = sha1_hex(Bencode::bencode($info->{info}));
         my $torrent_name = $info->{info}{name} // basename($file_path);
 
         # --- Bucket assignment ---
@@ -113,6 +113,15 @@ sub extract_metadata {
             comment     => $info->{comment}  // '',
         };
 
+        # --- TODO: translation hook ---
+        if (my $translation = $opts->{translation}) {   # e.g. supplied externally
+            if ($metadata->{comment}) {
+                $metadata->{comment} .= "\nEN: $translation";
+            } else {
+                $metadata->{comment} = "EN: $translation";
+            }
+        }
+
         # --- Dupe / authoritative handling ---
         if (exists $seen{$infohash}) {
             $intra_dupe_count++;
@@ -120,22 +129,43 @@ sub extract_metadata {
             next;
         }
 
-        # Torrent survives dedupe
-        $seen{$infohash} = 1;
-        $parsed_by_infohash{$infohash} = $metadata;
-        push @{ $parsed_by_bucket{$bucket} }, $metadata;
-        $bucket_uniques{$bucket}++;
-
-        # --- Colliders (kitchen_sink only) ---
-        # --- If %opts{normalize} = true
-        # --- this will determine renaming collisions.
+        # --- Collision case study (only for kitchen_sink) ---
         if ($bucket eq 'kitchen_sink') {
             my $base = $torrent_name . ".torrent";
             push @{ $colliders{$base} }, $file_path;
         }
+
+        # --- Normalization (optional, behind opts flag) ---
+        if ($opts->{normalize}) {
+            my $normalized_path = Utils::normalize_filename(
+                $metadata,     # pass metadata hashref
+                \%colliders,   # pass colliders hashref
+                $opts
+            );
+
+            if ($normalized_path ne $metadata->{source_path}) {
+                $metadata->{source_path} = $normalized_path;
+                $rename_count++;
+            }
+
+            $collision_count++ if $colliders{_last_collision};
+        }
+
+
+        $seen{$infohash} = 1;
+        $parsed_by_infohash{$infohash} = $metadata;
+        push @{ $parsed_by_bucket{$bucket} }, $metadata;
+        $bucket_uniques{$bucket}++;
     }
 
-
+    Logger::summary("[SUMMARY] [BUCKETS]");
+    for my $bucket (sort keys %bucket_uniques) {
+        my $u = $bucket_uniques{$bucket} // 0;
+        my $d = $bucket_dupes{$bucket}   // 0;
+        my $t = $u + $d;
+        Logger::summary(sprintf("   %-20s total=%d, uniques=%d, dupes=%d",
+            $bucket, $t, $u, $d));
+    }
 
     return {
         by_infohash => \%parsed_by_infohash,
@@ -143,10 +173,11 @@ sub extract_metadata {
         uniques     => \%bucket_uniques,
         dupes       => \%bucket_dupes,
         renamed     => $rename_count,
-        collisions => \%colliders,
+        collisions  => \%colliders,       # return whole collision map
         intra_dupes => $intra_dupe_count,
     };
 }
+
 sub report_collision_groups {
     my ($colliders) = @_;
     my $collision_groups = 0;
@@ -155,10 +186,11 @@ sub report_collision_groups {
         my $files = $colliders->{$name};
         if (@$files > 1) {
             $collision_groups++;
-            Logger::summary("\n[COLLIDER] $name");
-            Logger::summary("    $_") for @$files;
+            Logger::info("\n[COLLIDER] $name");
+            Logger::info("    $_") for @$files;
         }
     }
+
     Logger::summary("[SUMMARY] Filename collision groups observed:\t$collision_groups");
 }
 

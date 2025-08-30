@@ -20,7 +20,11 @@ use TorrentParser qw(
   report_collision_groups
 );
 use ZombieManager;
-use Utils qw(sprinkle);
+use Utils qw(
+            normalize_to_arrayref
+            normalize_filename
+            sprinkle
+            );
 use Logger;
 use DevTools;
 
@@ -109,20 +113,13 @@ Logger::summary("[TORRENTS] Torrent files located\t\t" . scalar(@all_t) );
 my $qb             = QBittorrent->new(\%opts);
 my $prefs = $qb->get_preferences;
 
-# --- Normalize QBT prefs to always be arrayrefs ---
-for my $key (qw(export_dir export_dir_fin)) {
-    if (exists $prefs->{$key}) {
-        if (ref $prefs->{$key} eq 'ARRAY') {
-            $opts{$key} = $prefs->{$key};   # already arrayref
-        }
-        elsif ($prefs->{$key}) {
-            $opts{$key} = [ $prefs->{$key} ]; # wrap scalar into arrayref
-        }
-    }
-    else {
-        $opts{$key} = [];  # default to empty arrayref
-    }
-}
+$opts{export_dir}     = normalize_to_arrayref($prefs->{export_dir});
+$opts{export_dir_fin} = normalize_to_arrayref($prefs->{export_dir_fin});
+
+say "export_dir:     ", join(", ", @{ $opts{export_dir}     || [] });
+say "export_dir_fin: ", join(", ", @{ $opts{export_dir_fin} || [] });
+
+
 
 my $qbt_loaded_tor = $qb->get_torrents_infohash();
 
@@ -134,9 +131,9 @@ my $tp = TorrentParser->new(
       });
 
 my $l_parsed = $tp->extract_metadata;
+
+#report_top_dupes($l_parsed, 5);   # show top 5 per bucket
 report_collision_groups($l_parsed->{collisions});
-
-
 
 process_all_infohashes($l_parsed, \%opts);
 
