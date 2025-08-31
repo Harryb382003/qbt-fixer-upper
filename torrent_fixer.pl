@@ -17,12 +17,12 @@ use QBittorrent;
 use TorrentParser qw(
   extract_metadata
   process_all_infohashes
+  normalize_filename
   report_collision_groups
 );
 use ZombieManager;
 use Utils qw(
             normalize_to_arrayref
-            normalize_filename
             sprinkle
             );
 use Logger;
@@ -134,6 +134,10 @@ my $l_parsed = $tp->extract_metadata;
 
 #report_top_dupes($l_parsed, 5);   # show top 5 per bucket
 report_collision_groups($l_parsed->{collisions});
+
+if ($opts{normalize}) {
+    normalize_collision_groups($l_parsed, \%opts);
+}
 
 process_all_infohashes($l_parsed, \%opts);
 

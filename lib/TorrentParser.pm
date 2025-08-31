@@ -22,7 +22,9 @@ our @EXPORT_OK = qw(
     extract_metadata
     match_by_date
     process_all_infohashes
+    normalize_filename
     report_collision_groups
+
 );
 
 my $CACHE_FILE = "cache/hash_cache.json";
@@ -135,23 +137,6 @@ sub extract_metadata {
             push @{ $colliders{$base} }, $file_path;
         }
 
-        # --- Normalization (optional, behind opts flag) ---
-        if ($opts->{normalize}) {
-            my $normalized_path = Utils::normalize_filename(
-                $metadata,     # pass metadata hashref
-                \%colliders,   # pass colliders hashref
-                $opts
-            );
-
-            if ($normalized_path ne $metadata->{source_path}) {
-                $metadata->{source_path} = $normalized_path;
-                $rename_count++;
-            }
-
-            $collision_count++ if $colliders{_last_collision};
-        }
-
-
         $seen{$infohash} = 1;
         $parsed_by_infohash{$infohash} = $metadata;
         push @{ $parsed_by_bucket{$bucket} }, $metadata;
@@ -176,6 +161,39 @@ sub extract_metadata {
         collisions  => \%colliders,       # return whole collision map
         intra_dupes => $intra_dupe_count,
     };
+}
+
+sub normalize_filename {
+    my ($meta, $opts) = @_;
+    my $old_path     = $meta->{source_path};
+    my $torrent_name = $meta->{name};
+    my $tracker      = $meta->{tracker};
+    my $comment      = $meta->{comment};
+
+    # Always make a safe filename
+    my $safe_name = $torrent_name;
+    $safe_name .= ".torrent" unless $safe_name =~ /\.torrent$/i;
+
+    my $dir      = dirname($old_path);
+    my $new_path = "$dir/$safe_name";
+
+    # Nothing to do if same
+    return $old_path if $old_path eq $new_path;
+
+    # If not normalizing, log intent and bail
+    unless ($opts->{normalize}) {
+        Logger::info("\n[normalize_filename] Would normalize: \n\t$old_path → \n\t $new_path");
+        return $old_path;
+    }
+
+    # Try rename
+    if (move($old_path, $new_path)) {
+        Logger::info("[normalize_filename] Renamed: \n\t$old_path → \n\t$new_path");
+        return $new_path;
+    } else {
+        Logger::warn("[normalize_filename] Failed to rename:\n\t$old_path →\n\t $new_path: $!");
+        return $old_path;
+    }
 }
 
 sub report_collision_groups {
