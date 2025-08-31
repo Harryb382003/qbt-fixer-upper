@@ -65,7 +65,7 @@ sub extract_metadata {
     my %parsed_by_bucket;
     my %bucket_uniques;
     my %bucket_dupes;
-    my %colliders;          # collision tracking
+    my %bucket_groups;      # grouped collision tracking
     my $intra_dupe_count = 0;
     my $rename_count     = 0;
     my $collision_count  = 0;
@@ -131,11 +131,9 @@ sub extract_metadata {
             next;
         }
 
-        # --- Collision case study (only for kitchen_sink) ---
-        if ($bucket eq 'kitchen_sink') {
-            my $base = $torrent_name . ".torrent";
-            push @{ $colliders{$base} }, $file_path;
-        }
+        # --- Collision case study (grouped by bucket) ---
+        $bucket_groups{$bucket}{$torrent_name . ".torrent"} //= [];
+        push @{ $bucket_groups{$bucket}{$torrent_name . ".torrent"} }, $metadata;
 
         $seen{$infohash} = 1;
         $parsed_by_infohash{$infohash} = $metadata;
@@ -158,7 +156,7 @@ sub extract_metadata {
         uniques     => \%bucket_uniques,
         dupes       => \%bucket_dupes,
         renamed     => $rename_count,
-        collisions  => \%colliders,       # return whole collision map
+        collisions  => \%bucket_groups,
         intra_dupes => $intra_dupe_count,
     };
 }
@@ -197,21 +195,24 @@ sub normalize_filename {
 }
 
 sub report_collision_groups {
-    my ($colliders) = @_;
+    my ($bucket_groups) = @_;
     my $collision_groups = 0;
 
-    for my $name (sort keys %$colliders) {
-        my $files = $colliders->{$name};
-        if (@$files > 1) {
-            $collision_groups++;
-            Logger::info("\n[COLLIDER] $name");
-            Logger::info("\t$_") for @$files;
+    # Specifically target kitchen_sink (or any bucket you care about)
+    if (exists $bucket_groups->{kitchen_sink}) {
+        for my $name (sort keys %{ $bucket_groups->{kitchen_sink} }) {
+            my $entries = $bucket_groups->{kitchen_sink}{$name};
+
+            if (@$entries > 1) {
+                $collision_groups++;
+                Logger::info("\n[COLLIDER] $name");
+                Logger::info("\t$_->{source_path}") for @$entries;
+            }
         }
-
     }
-    Logger::summary("Filename collision groups observed:\t$collision_groups");
-}
 
+    Logger::summary("[SUMMARY] Filename collision groups observed:\t$collision_groups");
+}
 sub process_all_infohashes {
     my ($parsed, $opts) = @_;
     Logger::info("\n[MAIN] Starting process_all_infohashes()");
