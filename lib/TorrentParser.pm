@@ -187,21 +187,21 @@ sub report_collision_groups {
         if (@$files > 1) {
             $collision_groups++;
             Logger::info("\n[COLLIDER] $name");
-            Logger::info("    $_") for @$files;
+            Logger::info("\t$_") for @$files;
         }
-    }
 
-    Logger::summary("[SUMMARY] Filename collision groups observed:\t$collision_groups");
+    }
+    Logger::summary("Filename collision groups observed:\t$collision_groups");
 }
 
 sub process_all_infohashes {
     my ($parsed, $opts) = @_;
-    Logger::info("[MAIN] Starting process_all_infohashes()");
+    Logger::info("\n[MAIN] Starting process_all_infohashes()");
 
     Logger::info("Parsed keys: " . join(", ", keys %$parsed));
     my $infohashes = $parsed->{by_infohash};
-    my $count      = scalar keys %$infohashes;
-    Logger::info(__LINE__ . " [MAIN] Found $count unique torrents to process");
+    my $count = scalar keys %$infohashes;
+    Logger::info(" [MAIN] Found $count unique torrents to process");
 
     foreach my $infohash (sort keys %$infohashes) {
         my $meta = $infohashes->{$infohash};

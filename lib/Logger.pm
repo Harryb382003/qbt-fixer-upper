@@ -39,6 +39,8 @@ my %color_scheme_dark = (
 );
 
 my %active_colors;
+my $defer_blank = 0;
+
 
 sub init {
     Logger::debug("#	init");
@@ -67,7 +69,7 @@ sub init {
     open($log_fh, '>', $log_file) or die "Cannot open log file $log_file: $!";
 }
 
-sub _log {# Ensure some palette exists even if init() not called yet
+sub _log { # Ensure some palette exists even if init() not called yet
     if (!%active_colors) {
         %active_colors = %color_scheme_light;
     }
@@ -75,12 +77,33 @@ sub _log {# Ensure some palette exists even if init() not called yet
     my $timestamp = scalar localtime;
 
     my $color     = $active_colors{$level} // 'reset';
-    my $dump_ok   = $Logger::opts->{dump_debug} || 0;  # only dump debug/trace if set
-    my $max_lines = 10;  # truncate console output
+    my $dump_ok   = $Logger::opts->{dump_debug} || 0;
+    my $max_lines = 10;
 
     foreach my $msg (@messages) {
-        my $console_msg = $msg; # what goes to the screen
-        my $file_msg    = $msg; # what goes to the log file
+        # If undefined, treat as blank
+        $msg //= "";
+
+        # Handle leading/trailing newlines as clean blanks
+        while ($msg =~ s/^\n//) {
+            print "\n";
+            print $log_fh "\n" if $log_fh;
+        }
+        while ($msg =~ s/\n$//) {
+            $msg =~ s/\n$//;
+            my $defer_blank = 1;
+            # defer printing until after normal message
+        }
+
+        # If message itself is now empty → just print blank
+        if ($msg eq '') {
+            print "\n";
+            print $log_fh "\n" if $log_fh;
+            next;
+        }
+
+        my $console_msg = $msg;
+        my $file_msg    = $msg;
 
         if (ref $msg) {
             local $Data::Dumper::Terse    = 1;
@@ -102,11 +125,17 @@ sub _log {# Ensure some palette exists even if init() not called yet
                 }
             }
         }
-
+        # --- handle clean newlines ---
+        while ($console_msg =~ s/^\n//) {
+            print "\n";   # clean blank line(s), no [INFO] prefix
+        }
         print color($color) . "[$level] $console_msg" . color('reset') . "\n";
+        print $log_fh "[$timestamp] [$level] $file_msg\n" if $log_fh;
 
-        if ($log_fh) {
-            print $log_fh "[$timestamp] [$level] $file_msg\n";
+        # trailing newlines → print after message
+        if ($defer_blank) {
+            print "\n";
+            print $log_fh "\n" if $log_fh;
         }
     }
 }
