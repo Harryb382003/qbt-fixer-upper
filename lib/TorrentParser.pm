@@ -7,7 +7,7 @@ use Data::Dumper;
 use File::Slurp qw(read_file write_file);
 use File::Path qw(make_path);
 use Digest::SHA qw(sha1_hex);
-use File::Basename qw(basename);
+use File::Basename qw(basename dirname);
 use List::Util qw(sum);
 use Bencode qw(bdecode bencode);
 use JSON;
@@ -161,39 +161,6 @@ sub extract_metadata {
     };
 }
 
-sub normalize_filename {
-    my ($meta, $opts) = @_;
-    my $old_path     = $meta->{source_path};
-    my $torrent_name = $meta->{name};
-    my $tracker      = $meta->{tracker};
-    my $comment      = $meta->{comment};
-
-    # Always make a safe filename
-    my $safe_name = $torrent_name;
-    $safe_name .= ".torrent" unless $safe_name =~ /\.torrent$/i;
-
-    my $dir      = dirname($old_path);
-    my $new_path = "$dir/$safe_name";
-
-    # Nothing to do if same
-    return $old_path if $old_path eq $new_path;
-
-    # If not normalizing, log intent and bail
-    unless ($opts->{normalize}) {
-        Logger::info("\n[normalize_filename] Would normalize: \n\t$old_path → \n\t $new_path");
-        return $old_path;
-    }
-
-    # Try rename
-    if (move($old_path, $new_path)) {
-        Logger::info("[normalize_filename] Renamed: \n\t$old_path → \n\t$new_path");
-        return $new_path;
-    } else {
-        Logger::warn("[normalize_filename] Failed to rename:\n\t$old_path →\n\t $new_path: $!");
-        return $old_path;
-    }
-}
-
 sub report_collision_groups {
     my ($bucket_groups) = @_;
     my $collision_groups = 0;
@@ -213,6 +180,159 @@ sub report_collision_groups {
 
     Logger::summary("[SUMMARY] Filename collision groups observed:\t$collision_groups");
 }
+
+sub normalize_filename {
+    my ($l_parsed, $opts, $stats) = @_;
+
+    $stats //= {};
+    $stats->{normalized}      //= 0;
+    $stats->{normalized_coll} //= 0;
+    $stats->{normalize_dry}   //= 0;
+
+    my $mode    = $opts->{normalize_mode} // 0;   # 'a' = all, 'c' = colliders
+    my $dry_run = $opts->{dry_run}        // 0;
+
+    if ($mode eq 'c') {
+        my $colliders = $l_parsed->{collisions}{kitchen_sink} // {};
+        for my $name (sort keys %$colliders) {
+            my $entries = $colliders->{$name};
+            next unless @$entries > 1;
+            _normalize_single($_, $opts, $stats, 1) for @$entries;
+        }
+    }
+    elsif ($mode eq 'a') {
+        my $all_meta = $l_parsed->{by_bucket}{kitchen_sink} // [];
+        for my $meta (values @$all_meta) {
+            _normalize_single($meta, $opts, $stats, 0);
+        }
+    }
+    else {
+        Logger::info("[normalize_filename] Normalization disabled (mode=0)");
+    }
+
+    # --- Always produce a clean summary ---
+    Logger::summary("\n--- Normalization Summary ---");
+    if ($stats->{normalized} || $stats->{normalized_coll} || $stats->{normalize_dry}) {
+        Logger::summary("    Normalized (all):       $stats->{normalized}")
+          if $stats->{normalized};
+        Logger::summary("    Normalized (colliders): $stats->{normalized_coll}")
+          if $stats->{normalized_coll};
+        Logger::summary("    Dry-run count:          $stats->{normalize_dry}")
+          if $stats->{normalize_dry};
+    } else {
+        Logger::summary("    No normalization changes performed");
+    }
+
+    return;
+}
+
+sub _normalize_single {
+    my ($meta, $opts, $stats, $is_coll) = @_;
+
+    my $old_path     = $meta->{source_path};
+    my $torrent_name = $meta->{name};
+
+    # Prevent double renames
+    return if $meta->{_normalized};
+
+    # --- Always make a safe filename ---
+    my $safe_name = $torrent_name;
+    $safe_name .= ".torrent" unless $safe_name =~ /\.torrent$/i;
+
+    my $dir      = dirname($old_path);
+    my $new_path;
+
+    if ($is_coll) {
+        # Collision → tracker/comment prefix
+        my $tracker = $meta->{tracker} // '';
+        my $comment = $meta->{comment} // '';
+        my $infohash = $meta->{infohash} // '';
+        my $prefixed = _prepend_tracker($tracker, $comment, $infohash, $safe_name);
+
+        $new_path = "$dir/$prefixed";
+    } else {
+        # Normal singleton
+        $new_path = "$dir/$safe_name";
+    }
+
+    # --- Nothing to do if same ---
+    return if $old_path eq $new_path;
+
+    my $dry_run = $opts->{dry_run};
+
+    if ($dry_run) {
+        Logger::info("[normalize_filename] Would normalize: \n\t$old_path → \n\t$new_path (dry-run)");
+        $stats->{normalize_dry}++;
+        return;
+    }
+
+    # --- Try the actual move ---
+    if (move($old_path, $new_path)) {
+        $meta->{source_path} = $new_path;
+        $meta->{_normalized} = 1;
+
+        if ($is_coll) {
+            $stats->{normalized_coll}++;
+            Logger::info("[normalize_filename] COLLIDER normalized: \n\t$old_path → \n\t$new_path");
+        } else {
+            $stats->{normalized}++;
+            Logger::info("[normalize_filename] Normalized: \n\t$old_path → \n\t$new_path");
+        }
+    } else {
+        Logger::warn("[normalize_filename] Failed to normalize:\n\t$old_path →\n\t$new_path: $!");
+    }
+}
+
+sub _prepend_tracker {
+    my ($tracker, $comment, $infohash, $filename) = @_;
+
+    my $prefix = '';
+
+    if ($tracker) {
+        $prefix = _shorten_tracker($tracker);
+    }
+    elsif ($comment && $comment =~ m{https?://([^/]+)}) {
+        $prefix = _shorten_tracker($1);
+    }
+
+    if ($comment && $comment =~ m{torrents\.php\?id=(\d+)}) {
+        $prefix .= "][$1";
+    }
+
+    if (!$prefix && $infohash) {
+        my $short_hash = substr($infohash, 0, 6);
+        $prefix = $short_hash;
+    }
+
+    # Nothing usable → just return the original filename
+    unless ($prefix) {return $filename} ;
+
+    return "[$prefix] $filename";
+}
+
+sub _shorten_tracker {
+    my ($url) = @_;
+    return '' unless $url;
+
+    # Extract hostname
+    my $host;
+    if ($url =~ m{https?://([^/:]+)}) {
+        $host = $1;
+    } else {
+        $host = $url;  # fallback
+    }
+
+    # Strip "tracker." and "www."
+    $host =~ s/^(tracker|www)\.//i;
+
+    # Take only first label before dot
+    my @parts = split(/\./, $host);
+    my $short = $parts[0] // $host;
+
+    return uc $short;  # always uppercase for consistency
+}
+
+
 sub process_all_infohashes {
     my ($parsed, $opts) = @_;
     Logger::info("\n[MAIN] Starting process_all_infohashes()");

@@ -37,8 +37,6 @@ Options:
 or on disk.
   --chunk n             process in chunks of n
   --dump-lines=i        First 5 lines of the Dumper output, unless --full-dump is passed
-  --full-dump           unleash the kraken onto your terminal
-  --
   --invert-colors       Invert day/night mode
   --verbose, -v         Increase verbosity
   --log-dir=<path>      Output path for logs
@@ -56,29 +54,27 @@ my $cfg      = -e $cfg_file ? decode_json(read_file($cfg_file)) : {};
 # --- Options ---
 my %opts;
 GetOptions(
-           "normalize|n"    => \$opts{normalize},
-           "max-cache"      => \$opts{max_cache},
            "dev-mode"       => \$opts{dev_mode},
-           "dry-run|d"      => \$opts{dry_run},
            "chunk=i"        => \$opts{chunk},
-           "dump-lines=i"   => \$opts{dump_lines},
-           "full-dump"      => \$opts{full_dump},
            "invert-colors"  => \$opts{invert_colors},
            "log-dir=s"      => \$opts{log_dir},
+           "max-cache=i"    => \$opts{max_cache},
+           "normalize|n=s"  => \$opts{normalize},
            "tor-dir"        => \$opts{torrent_dir},
            "verbose|v+"     => \$opts{verbose_level},
            "scan-zombies|z" => \$opts{scan_zombies},
            "wiggle=i"       => \$opts{wiggle},
-           "help|h"         => sub { usage(); exit(0); })
+           "help|h"         => sub { usage(); exit(0); },
+           )
     or usage();
 
 # --- Set Defaults ---
-$opts{os}        = Utils::test_OS();
-$opts{dark_mode} = Utils::detect_dark_mode($opts{os});
-$opts{chunk}     ||= $cfg->{chunk} || 5;    # default to chunks of 5
-$opts{max_cache} ||= $cfg->{max_cache}
-    // 2;    # default to 2 cache files of each type
-$opts{wiggle} ||= $cfg->{wiggle} || 10;  # default to 10 minutes if not provided
+$opts{os}            = Utils::test_OS();
+$opts{dark_mode}     = Utils::detect_dark_mode($opts{os});
+$opts{chunk}       ||= $cfg->{chunk}          || 5;        # default to chunks of 5
+$opts{max_cache}   ||= $cfg->{max_cache}      // 2;    # default to 2 cache files of each type
+$opts{normalize}   ||= $cfg->{normalize}      || 0;
+$opts{wiggle}      ||= $cfg->{wiggle}         || 10;         # default to 10 minutes if not provided
 $opts{dedupe_dir}  ||= $cfg->{dedupe_dir}     || "duplicates";
 $opts{log_dir}     ||= $cfg->{log_dir}        || "logs";
 $opts{torrent_dir} ||= $cfg->{torrent_dir}    || "/";
@@ -86,12 +82,30 @@ $opts{excluded}    ||= $cfg->{excluded_paths} || [];
 
 make_path($opts{log_dir}) unless -d $opts{log_dir};
 
+# --- Normalize options ---
+if (exists $opts{normalize}) {
+    my $mode = $opts{normalize};
+
+    $opts{normalize_mode} = 0;   # default: off
+    $opts{dry_run}        = 0;   # default: no dry-run
+
+    if ($mode =~ /^([ac])([d]?)$/i) {
+        $opts{normalize_mode} = $1;
+        $opts{dry_run}        = 1 if $2;
+    }
+    elsif ($mode eq '0') {
+        $opts{normalize_mode} = 0;        # explicit off
+        Logger::info("[MAIN] Normalization disabled (--normalize=0)");
+    }
+    else {
+        die "[MAIN] Invalid --normalize value: $mode\n"
+          . "Use: 0 (off), a (all), c (colliders), ad/cd (dry-run)";
+    }
+}
+
 # --- Setup ---
-$opts{wiggle} //= 10;
 Logger::init(\%opts);
 Logger::info("Logger initialized");
-
-
 
 # --- Main logic placeholder ---
 Logger::info("[MAIN] Starting processing...");
@@ -132,11 +146,13 @@ my $tp = TorrentParser->new(
 
 my $l_parsed = $tp->extract_metadata;
 
-#report_top_dupes($l_parsed, 5);   # show top 5 per bucket
+# report_top_dupes($l_parsed, 5);   # show top 5 per bucket
 report_collision_groups($l_parsed->{collisions});
 
-if ($opts{normalize}) {
-    normalize_collision_groups($l_parsed, \%opts);
+# --- Normalization ---
+if ($opts{normalize_mode}) {
+    Logger::info("\n[MAIN] Starting normalization pass...");
+    normalize_filename($l_parsed, \%opts);
 }
 
 process_all_infohashes($l_parsed, \%opts);

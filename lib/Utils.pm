@@ -111,45 +111,6 @@ sub maybe_translate {
 # --- helper ---
 
 
-sub _prepend_tracker {
-    my ($tracker, $comment, $filename) = @_;
-
-    my $prefix;
-    if ($tracker) {
-        $prefix = _shorten_tracker($tracker);
-    } elsif ($comment && $comment =~ m{https?://([^/]+)}) {
-        $prefix = _shorten_tracker($1);
-    }
-
-    return $filename unless $prefix;
-    return "[$prefix] - $filename";
-}
-
-sub _shorten_tracker {
-    my ($url) = @_;
-    return '' unless $url;
-
-    # Extract hostname
-    my $host;
-    if ($url =~ m{https?://([^/:]+)}) {
-        $host = $1;
-    } else {
-        $host = $url;  # fallback
-    }
-
-    # Strip leading "tracker."
-    $host =~ s/^tracker\.//i;
-
-    # Take the first meaningful label
-    my @parts = split(/\./, $host);
-    my $short = $parts[0] // $host;
-
-    # Uppercase
-    $short = uc $short;
-
-    return $short;
-}
-
 # ---------------------------
 # Debug sprinkle helper
 # ---------------------------
