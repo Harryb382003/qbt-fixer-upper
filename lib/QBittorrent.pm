@@ -76,7 +76,7 @@ sub get_torrents_infohash {
 
     my $torrents = decode_json($res->decoded_content);
     my %hash = map { $_->{hash} => $_ } @$torrents;
-    Logger::summary("[SUMMARY] Torrents loaded in qBittorrent     \t" . scalar(keys %hash));
+    Logger::summary("Torrents loaded in qBittorrent     \t" . scalar(keys %hash));
 #    Logger::info("Successfully loaded into cache " . scalar(keys %hash));
     stop_timer("qBittorrent connect");
     return \%hash;
@@ -183,7 +183,7 @@ sub get_q_zombies {
             Logger::info("[CACHE] Loading zombie torrent list from: $latest_cache");
             my $json = read_file($latest_cache);
             my $cached = decode_json($json);
-            Logger::summary("[SUMMARY][CACHE] Zombie torrents in qBittorrent:\t" . scalar keys %$cached);
+            Logger::summary("[CACHE] Zombie torrents in qBittorrent:\t" . scalar keys %$cached);
             return $cached;
         }
         else {
@@ -212,7 +212,7 @@ sub get_q_zombies {
         }
     }
 
-    Logger::summary("[SUMMARY][LIVE] Zombie torrents in qBittorrent:\t" . scalar keys %zombies);
+    Logger::summary("[LIVE] Zombie torrents in qBittorrent:\t" . scalar keys %zombies);
 
     # --- Update Cache ---
     eval {

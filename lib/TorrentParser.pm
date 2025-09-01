@@ -4,6 +4,7 @@ package TorrentParser;
 use common::sense;
 use Data::Dumper;
 
+use File::Copy qw(move);
 use File::Slurp qw(read_file write_file);
 use File::Path qw(make_path);
 use Digest::SHA qw(sha1_hex);
@@ -141,7 +142,7 @@ sub extract_metadata {
         $bucket_uniques{$bucket}++;
     }
 
-    Logger::summary("[SUMMARY] [BUCKETS]");
+    Logger::summary(" [BUCKETS]");
     for my $bucket (sort keys %bucket_uniques) {
         my $u = $bucket_uniques{$bucket} // 0;
         my $d = $bucket_dupes{$bucket}   // 0;
@@ -178,7 +179,7 @@ sub report_collision_groups {
         }
     }
 
-    Logger::summary("[SUMMARY] Filename collision groups observed:\t$collision_groups");
+    Logger::summary(" Filename collision groups observed:\t$collision_groups");
 }
 
 sub normalize_filename {
@@ -340,7 +341,7 @@ sub process_all_infohashes {
     Logger::info("Parsed keys: " . join(", ", keys %$parsed));
     my $infohashes = $parsed->{by_infohash};
     my $count = scalar keys %$infohashes;
-    Logger::info(" [MAIN] Found $count unique torrents to process");
+    Logger::info("[MAIN] Found $count unique torrents to process");
 
     foreach my $infohash (sort keys %$infohashes) {
         my $meta = $infohashes->{$infohash};

@@ -30,7 +30,7 @@ use DevTools;
 
 sub usage {
   print <<"EOF";
-Usage: $0 [options]
+sage: $0 [options]
 Options:
   --normalize           normalize torrent name to *.torrent's authoritative name
   --dev-mode            is effectively just a safety wrapper around any code that would change something in qBittorrent
@@ -42,7 +42,7 @@ or on disk.
   --log-dir=<path>      Output path for logs
   --scan-zombies, -z    search for zombie torrents in qbt
   --wiggle=i            Time wiggle in minutes for date matching
-  --help, -h            Show help
+  --help, -h            how help
 EOF
   exit(1);
 }
@@ -68,7 +68,7 @@ GetOptions(
            )
     or usage();
 
-# --- Set Defaults ---
+# --- et Defaults ---
 $opts{os}            = Utils::test_OS();
 $opts{dark_mode}     = Utils::detect_dark_mode($opts{os});
 $opts{chunk}       ||= $cfg->{chunk}          || 5;        # default to chunks of 5
@@ -95,35 +95,35 @@ if (exists $opts{normalize}) {
     }
     elsif ($mode eq '0') {
         $opts{normalize_mode} = 0;        # explicit off
-        Logger::info("[MAIN] Normalization disabled (--normalize=0)");
+        Logger::info("Normalization disabled (--normalize=0)");
     }
     else {
-        die "[MAIN] Invalid --normalize value: $mode\n"
-          . "Use: 0 (off), a (all), c (colliders), ad/cd (dry-run)";
+        die "Invalid --normalize value: $mode\n"
+          . "se: 0 (off), a (all), c (colliders), ad/cd (dry-run)";
     }
 }
 
-# --- Setup ---
+# --- etup ---
 Logger::init(\%opts);
 Logger::info("Logger initialized");
 
-# --- Main logic placeholder ---
-Logger::info("[MAIN] Starting processing...");
+# --- ain logic placeholder ---
+Logger::info("Starting processing...");
 
 # The rest of the torrent fixing logic follows here.
 
 
 # --- Locate Torrents ---
 # This is always a fresh start.
-# Maintaining a cache here would have a huge disk footprint.
+# aintaining a cache here would have a huge disk footprint.
 my @all_t = FileLocator::locate_l_torrents(\%opts);
-Logger::info("[MAIN] FileLocator complete, passing to TorrentParser");
-Logger::summary("[TORRENTS] Torrent files located\t\t" . scalar(@all_t) );
+Logger::info("FileLocator complete, passing to TorrentParser");
+Logger::summary("Torrent files located\t\t" . scalar(@all_t) );
 
 
 # --- Load QBittorrent ---
 # This is always a fresh start.
-# Maintaining a cache here would keep us from having live stats..
+# aintaining a cache here would keep us from having live stats..
 my $qb             = QBittorrent->new(\%opts);
 my $prefs = $qb->get_preferences;
 
@@ -151,7 +151,7 @@ report_collision_groups($l_parsed->{collisions});
 
 # --- Normalization ---
 if ($opts{normalize_mode}) {
-    Logger::info("\n[MAIN] Starting normalization pass...");
+    Logger::info("\nStarting normalization pass...");
     normalize_filename($l_parsed, \%opts);
 }
 
@@ -159,13 +159,13 @@ process_all_infohashes($l_parsed, \%opts);
 
 #
 # # --- Zombie Detection ---
-# my $zm = ZombieManager->new(
+# my $zm = Zombieanager->new(
 #     qb      => $qb,
 #     zombies => $caches{zombies},
 #     opts    => \%opts,
 # );
 # sprinkle('zm', $zm);
 
-# Add other managers here...
+# dd other managers here...
 
 Logger::flush_summary();
