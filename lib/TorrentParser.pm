@@ -56,12 +56,11 @@ sub new {
 }
 
 sub extract_metadata {
-    my ($self) = @_;
-
+    my ($self, $qbt) = @_;
     my $opts  = $self->{opts};
     my @files = @{ $self->{all_torrents} };
 
-    my %seen;
+    my %seen = map { $_ => 1 } keys %$qbt;
     my %parsed_by_infohash;
     my %parsed_by_bucket;
     my %bucket_uniques;
@@ -71,8 +70,11 @@ sub extract_metadata {
     my $rename_count     = 0;
     my $collision_count  = 0;
 
+    my (%metadata,$metadata);
+Logger::info("Primed \%seen with ".scalar(keys %seen)." qbt infohashes");
+
     foreach my $file_path (@files) {
-        Logger::debug("[TorrentParser] Processing $file_path");
+        Logger::trace("[TorrentParser] Processing $file_path");
 
         # --- Read and decode torrent ---
         my $raw;
@@ -100,7 +102,7 @@ sub extract_metadata {
         my $bucket = _assign_bucket($file_path, $opts);
 
         # --- Build metadata ---
-        my $metadata = {
+        $metadata = {
             infohash    => $infohash,
             name        => $torrent_name,
             files       => $info->{files}
@@ -173,8 +175,8 @@ sub report_collision_groups {
 
             if (@$entries > 1) {
                 $collision_groups++;
-                Logger::info("\n[COLLIDER] $name");
-                Logger::info("\t$_->{source_path}") for @$entries;
+#                 Logger::info("\n[COLLIDER] $name");
+#                 Logger::info("\t$_->{source_path}") for @$entries;
             }
         }
     }
@@ -244,7 +246,7 @@ sub _normalize_single {
     my $new_path;
 
     if ($is_coll) {
-        # Collision → tracker/comment prefix
+        # Collision -> tracker/comment prefix
         my $tracker = $meta->{tracker} // '';
         my $comment = $meta->{comment} // '';
         my $infohash = $meta->{infohash} // '';
@@ -262,7 +264,7 @@ sub _normalize_single {
     my $dry_run = $opts->{dry_run};
 
     if ($dry_run) {
-        Logger::info("[normalize_filename] Would normalize: \n\t$old_path → \n\t$new_path (dry-run)");
+        Logger::info("[normalize_filename] Would normalize: \n\t$old_path -> \n\t$new_path (dry-run)");
         $stats->{normalize_dry}++;
         return;
     }
@@ -274,13 +276,13 @@ sub _normalize_single {
 
         if ($is_coll) {
             $stats->{normalized_coll}++;
-            Logger::info("[normalize_filename] COLLIDER normalized: \n\t$old_path → \n\t$new_path");
+            Logger::info("[normalize_filename] COLLIDER normalized: \n\t$old_path -> \n\t$new_path");
         } else {
             $stats->{normalized}++;
-            Logger::info("[normalize_filename] Normalized: \n\t$old_path → \n\t$new_path");
+            Logger::info("[normalize_filename] Normalized: \n\t$old_path -> \n\t$new_path");
         }
     } else {
-        Logger::warn("[normalize_filename] Failed to normalize:\n\t$old_path →\n\t$new_path: $!");
+        Logger::warn("[normalize_filename] Failed to normalize:\n\t$old_path ->\n\t$new_path: $!");
     }
 }
 
@@ -305,7 +307,7 @@ sub _prepend_tracker {
         $prefix = $short_hash;
     }
 
-    # Nothing usable → just return the original filename
+    # Nothing usable -> just return the original filename
     unless ($prefix) {return $filename} ;
 
     return "[$prefix] $filename";
@@ -428,7 +430,7 @@ sub _collision_handler {
 
     # --- Authoritative buckets (qBittorrent managed) ---
     if ($bucket ne 'kitchen_sink') {
-        Logger::summary("[NORMALIZE] Authoritative bucket ($bucket) → safe: $base");
+        Logger::summary("[NORMALIZE] Authoritative bucket ($bucket) -> safe: $base");
         $colliders->{case_study}{authoritative_safe}++;
         return "authoritative_safe";
     }
@@ -439,12 +441,12 @@ sub _collision_handler {
 
         if ($normalized ne $path) {
             if (-e $normalized) {
-                Logger::summary("[NORMALIZE] KS collision escalation failed (target exists) → manual: $normalized");
+                Logger::summary("[NORMALIZE] KS collision escalation failed (target exists) -> manual: $normalized");
                 push @{ $colliders->{manual} }, $path;
                 $colliders->{case_study}{kitchen_sink_manual}++;
                 return "kitchen_sink_manual";
             }
-            Logger::summary("[NORMALIZE] KS collision normalized: $base → $normalized");
+            Logger::summary("[NORMALIZE] KS collision normalized: $base -> $normalized");
             $colliders->{case_study}{kitchen_sink_normalized}++;
             return "kitchen_sink_normalized";
         }
@@ -455,7 +457,7 @@ sub _collision_handler {
         }
     }
 
-    Logger::summary("[NORMALIZE] KS missing source file → ignored: $base");
+    Logger::summary("[NORMALIZE] KS missing source file -> ignored: $base");
     $colliders->{case_study}{kitchen_sink_missing}++;
     return "kitchen_sink_missing";
 }

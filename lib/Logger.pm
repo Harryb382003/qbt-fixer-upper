@@ -43,100 +43,78 @@ my $defer_blank = 0;
 
 
 sub init {
-    Logger::debug("#	init");
-    my ($opts) = @_;
-    $Logger::opts = $opts;
+    my ($init_opts) = @_;
+    # store caller’s opts in our package-global
+    $opts = $init_opts;
 
-    # Pick color scheme based on dark mode flag
+    # pick color scheme
     if ($opts->{dark_mode}) {
         %active_colors = %color_scheme_dark;
     } else {
         %active_colors = %color_scheme_light;
     }
-
-    # If invert-colors flag is set, swap the schemes
     if ($opts->{invert_colors}) {
-        %active_colors = ($opts->{dark_mode})
-            ? %color_scheme_light
-            : %color_scheme_dark;
+        %active_colors = $opts->{dark_mode} ? %color_scheme_light : %color_scheme_dark;
     }
 
-    # Make sure log dir exists
+    # logfile
     my $log_dir = $opts->{log_dir} || '.';
     make_path($log_dir) unless -d $log_dir;
-
     $log_file = File::Spec->catfile($log_dir, "last.log");
     open($log_fh, '>', $log_file) or die "Cannot open log file $log_file: $!";
 }
 
-sub _log { # Ensure some palette exists even if init() not called yet
-    if (!%active_colors) {
-        %active_colors = %color_scheme_light;
-    }
+sub _log {
+    # ensure a palette even if init() not called yet
+    if (!%active_colors) { %active_colors = %color_scheme_light; }
+
     my ($level, @messages) = @_;
     my $timestamp = scalar localtime;
 
-    my $color     = $active_colors{$level} // 'reset';
-    my $dump_ok   = $Logger::opts->{dump_debug} || 0;
+    my $color = $active_colors{$level} // 'reset';
+
+    # --- verbosity gates (centralized) ---
+    # Getopt 'v+' yields: -v=1, -vv=2, -vvv=3, -vvvv=4
+    my $v = ($opts && defined $opts->{verbose}) ? $opts->{verbose} : 0;
+
+    # DEBUG only with -vvv or higher
+    if ($level eq 'DEBUG' && $v < 3) {
+        return;
+    }
+    # TRACE only with -vvvv
+    if ($level eq 'TRACE' && $v < 4) {
+        return;
+    }
+
     my $max_lines = 10;
+    for my $msg (@messages) {
+        $msg //= '';
+        my $defer_blank = 0;
 
-    foreach my $msg (@messages) {
-        # If undefined, treat as blank
-        $msg //= "";
+        while ($msg =~ s/^\n//) { print "\n"; print $log_fh "\n" if $log_fh; }
+        while ($msg =~ s/\n$//) { $defer_blank = 1; }
 
-        # Handle leading/trailing newlines as clean blanks
-        while ($msg =~ s/^\n//) {
-            print "\n";
-            print $log_fh "\n" if $log_fh;
-        }
-        while ($msg =~ s/\n$//) {
-            $msg =~ s/\n$//;
-            my $defer_blank = 1;
-            # defer printing until after normal message
-        }
+        if ($msg eq '') { print "\n"; print $log_fh "\n" if $log_fh; next; }
 
-        # If message itself is now empty → just print blank
-        if ($msg eq '') {
-            print "\n";
-            print $log_fh "\n" if $log_fh;
-            next;
-        }
-
-        my $console_msg = $msg;
-        my $file_msg    = $msg;
-
+        my ($console_msg, $file_msg) = ($msg, $msg);
         if (ref $msg) {
             local $Data::Dumper::Terse    = 1;
             local $Data::Dumper::Indent   = 1;
             local $Data::Dumper::Sortkeys = 1;
+            $console_msg = $file_msg = Dumper($msg);
 
-            if ($level !~ /^(DEBUG|TRACE)$/ || $dump_ok) {
-                $file_msg    = Dumper($msg);
-                $console_msg = Dumper($msg);
-            } else {
-                $file_msg    = sprintf("[ref: %s]", ref $msg);
-                $console_msg = $file_msg;
-            }
-
-            unless ($dump_ok) {
+            if ($v < 3) {
                 my @lines = split /\n/, $console_msg;
                 if (@lines > $max_lines) {
                     $console_msg = join("\n", @lines[0 .. $max_lines - 1]) . "\n... (truncated)";
                 }
             }
         }
-        # --- handle clean newlines ---
-        while ($console_msg =~ s/^\n//) {
-            print "\n";   # clean blank line(s), no [INFO] prefix
-        }
+
         print color($color) . "[$level] $console_msg" . color('reset') . "\n";
         print $log_fh "[$timestamp] [$level] $file_msg\n" if $log_fh;
 
-        # trailing newlines → print after message
-        if ($defer_blank) {
-            print "\n";
-            print $log_fh "\n" if $log_fh;
-        }
+        if ($defer_blank) { print "\n"; print $log_fh "\n" if $log_fh; }
     }
 }
 
@@ -148,18 +126,18 @@ sub _timestamp {
 }
 
 # Public logging methods
-sub info    { _log("INFO",    shift); }
-sub warn    { _log("WARN",    shift); }
-sub error   { _log("ERROR",   shift); }
-sub debug   { _log("DEBUG",   shift) if $verbose >= 2; }
-sub trace   { _log("TRACE",   shift) if $verbose >= 3; }
-sub success { _log("SUCCESS", shift); }
-sub dev {
-    Logger::debug("#	dev");
-    my ($msg) = @_;
-    return unless $opts->{dev_mode};
-    info("[DEV] $msg");
-}
+sub info    { _log("INFO",    @_); }
+sub warn    { _log("WARN",    @_); }
+sub error   { _log("ERROR",   @_); }
+sub debug   { _log("DEBUG",   @_); } #   if $verbose >= 2; }
+sub trace   { _log("TRACE",   @_); } #   if $verbose >= 3; }
+sub success { _log("SUCCESS", @_); }
+sub dev     { _log("DEV",     @_); }
+#     Logger::debug("#	dev");
+#     my ($msg) = @_;
+#     return unless $opts->{dev_mode};
+#     info("[DEV] $msg");
+# }
 
 # Log used CLI options
 sub log_used_opts {

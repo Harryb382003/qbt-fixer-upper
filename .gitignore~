@@ -116,6 +116,7 @@ perl-stacktrace.txt
 *.xz
 *.7z
 *.rar
+.zips/
 
 # -------------------------------------------------
 # Editor / IDE directories
@@ -164,3 +165,8 @@ Icon?
 !*.pl
 !*.pm
 !*.t
+torrent_fixer.pl.kate-swp
+.sandbox/
+.sandbox/
+torrent_fixer_diff.txt
+lib/TorrentParser.pm.derp
