@@ -19,31 +19,41 @@ use Logger;
 
 use Exporter 'import';
 our @EXPORT_OK = qw(
-    locate_items
-    locate_torrents
-    load_cache
-    write_cache
-    compute_infohash
-    bdecode_file
-    get_mdls
-    start_timer
-    stop_timer
-    normalize_to_arrayref
-    maybe_translate
-    parse_chunk_spec
-    chunk
-    payload_ok
-    derive_save_path
-    prompt_between_chunks
-    pause_between_chunks
-    sprinkle
+                    dump_hash_to_disk
+                    start_timer
+                    stop_timer
+                    payload_ok
+                    derive_save_path
+                    locate_items
+                    ensure_temp_ignore_dir
+                    normalize_to_arrayref
 
-);
+                    );
 
+
+#
+#     locate_torrents
+#     load_cache
+#     write_cache
+#     compute_infohash
+#     bdecode_file
+#     get_mdls
+#     start_timer
+#     stop_timer
+#     normalize_to_arrayref
+#     maybe_translate
+#     parse_chunk_spec
+#
+#
+#
+#     prompt_between_chunks
+#     pause_between_chunks
+#     sprinkle
 
 # ---------------------------
 # Misc utilities
 # ---------------------------
+
 sub test_OS {
     my $osname = $^O;  # Built-in Perl variable for OS name
 
@@ -61,6 +71,168 @@ sub test_OS {
     }
 }
 
+sub dump_hash_to_disk {
+    my ($href, $path) = @_;
+    $path ||= "parsed_dump.pl";   # default filename if none given
+
+    open my $fh, '>', $path or die "Cannot open $path: $!";
+    local $Data::Dumper::Terse    = 1;  # no $VAR1 =
+    local $Data::Dumper::Indent   = 1;  # pretty print
+    local $Data::Dumper::Sortkeys = 1;  # stable key order
+    print $fh Dumper($href);
+    close $fh;
+
+    print "[INFO] wrote parsed dump to $path\n";
+}
+
+# ---------------------------
+# Output coloring
+# ---------------------------
+
+
+sub detect_dark_mode {
+	Logger::debug("#	detect_dark_mode");
+    my ($os) = @_;
+    $os ||= test_OS();
+
+    if ($os eq "macos") {
+        my $appearance = `defaults read -g AppleInterfaceStyle 2>/dev/null`;
+        chomp $appearance;
+        return $appearance =~ /Dark/i ? 1 : 0;
+    }
+    elsif ($os eq "linux") {
+        # Example: check GTK theme settings (GNOME-based)
+        my $theme = `gsettings get org.gnome.desktop.interface gtk-theme 2>/dev/null`;
+        return $theme =~ /dark/i ? 1 : 0 if $theme;
+    }
+
+    return 0; # default to light mode if unknown
+}
+
+# ---------------------------
+#
+# ---------------------------
+
+sub ensure_temp_ignore_dir {
+    my ($opts) = @_;
+    my $cwd = getcwd();
+    my $dir = File::Spec->catdir($cwd, 'temp_ignore');
+
+    unless (-d $dir) {
+        make_path($dir);
+    }
+
+    # remember explicitly
+    $opts->{temp_ignore_dir} = $dir;
+
+    # normalize & append to export_dir_fin (your “ignored contents” set)
+    my $arr = $opts->{export_dir_fin};
+    if (ref($arr) ne 'ARRAY') {
+        $arr = defined $arr ? [$arr] : [];
+    }
+    # avoid duplicates (string match)
+    my %seen = map { $_ => 1 } @$arr;
+    push @$arr, $dir unless $seen{$dir};
+    $opts->{export_dir_fin} = $arr;
+
+    return $dir;
+}
+
+sub sanity_check_payload {
+    my ($meta, $save_path, $bucket) = @_;
+    my @issues;
+    my $valid = 1;
+
+    foreach my $file (@{ $meta->{files} }) {
+        my $path = File::Spec->catfile($save_path, $file->{path});
+        if (!-e $path) {
+            push @issues, "missing:$path";
+            $valid = 0;
+            next;
+        }
+
+        my $size_fs = -s $path;
+        my $size_meta = $file->{length};
+
+        if ($size_fs != $size_meta) {
+            # 0-byte allowance
+            if ($size_fs == 0) {
+                push @issues, "zero_byte:$path";
+            } else {
+                push @issues, "size_mismatch:$path ($size_fs != $size_meta)";
+                $valid = 0;
+            }
+        }
+    }
+
+    # Special rule: DUMP bucket completion threshold
+    if ($bucket eq 'dump') {
+        my $total_bytes = $meta->{length};
+        my $have_bytes  = 0;
+        foreach my $file (@{ $meta->{files} }) {
+            my $path = File::Spec->catfile($save_path, $file->{path});
+            $have_bytes += (-e $path ? (-s $path) : 0);
+        }
+        my $completion = $total_bytes ? ($have_bytes / $total_bytes) : 0;
+
+        # 1% per GB rule
+        my $threshold = ($total_bytes / (1024*1024*1024)) * 0.01;
+        if ($completion < $threshold) {
+            push @issues, "below_threshold: " . sprintf("%.2f%% < %.2f%%", $completion*100, $threshold*100);
+            $valid = 0;
+        }
+    }
+
+    return {
+        valid  => $valid,
+        issues => \@issues,
+    };
+}
+
+sub normalize_to_arrayref {
+    my $val = shift;
+    return [] unless defined $val;
+    return ref($val) eq 'ARRAY' ? $val : [$val];
+}
+
+# ---------------------------
+# Time and timers
+# ---------------------------
+my %TIMERS;
+
+sub start_timer {
+    my ($label) = @_;
+    $TIMERS{$label} = [gettimeofday];  # store arrayref under label
+    Logger::debug("Starting timer: $label") if defined $label;
+}
+
+sub stop_timer {
+    my ($label) = @_;
+    if (exists $TIMERS{$label}) {
+        my $elapsed = tv_interval($TIMERS{$label});
+        Logger::debug("Stopped timer: $label after ${elapsed}s") if defined $label;
+        delete $TIMERS{$label};
+        return $elapsed;
+    } else {
+        Logger::warn("Timer '$label' not found");
+        return undef;
+    }
+}
+
+sub _str2epoch {
+    my ($str) = @_;
+    return unless $str;
+    my $epoch = eval { POSIX::strftime("%s", localtime(str2time($str))) };
+    return $epoch || 0;
+}
+
+# ---------------------------
+
+
+
+=pod
+
+
 sub deep_sort {
     my ($thing) = @_;
     if (ref $thing eq 'HASH') {
@@ -74,105 +246,7 @@ sub deep_sort {
     }
 }
 
-sub locate_torrents {
-    my ($opts) = @_;
-    $opts ||= {};
 
-    # Build prune roots from your existing ignore set (export_dir_fin)
-    my @prune;
-    if (ref $opts->{export_dir_fin} eq 'ARRAY') {
-        push @prune, @{ $opts->{export_dir_fin} };
-    } elsif ($opts->{export_dir_fin}) {
-        push @prune, $opts->{export_dir_fin};
-    }
-
-    my $paths = locate_items({
-        ext   => 'torrent',
-        kind  => 'file',
-        prune => \@prune,
-    });
-
-    return wantarray ? @$paths : $paths;
-}
-
-sub locate_items {
-    my ($args) = @_;
-    $args ||= {};
-
-    Logger::debug("#\tlocate_items");
-    start_timer("locate_items");
-
-    # Check Spotlight availability
-    my $mdfind_path = `command -v mdfind 2>/dev/null`;
-    chomp $mdfind_path;
-    my $has_mdfind = ($mdfind_path && -x $mdfind_path) ? 1 : 0;
-
-    unless ($has_mdfind) {
-        # no code has been written to use File::Find or any other backend
-        # this is a placeholder for future Linux/BSD compatibility
-        Logger::error("[Utils] mdfind not available; File::Find fallback not yet implemented");
-        stop_timer("locate_items");
-        return wantarray ? () : [];
-    }
-
-    my $kind  = lc($args->{kind} // 'any');
-    my $name  = $args->{name};
-    my $ext   = $args->{ext};
-    my $limit = $args->{limit};
-    my @prune = @{ $args->{prune} // [] };
-
-    # Build a single string command with proper quoting.
-    my $cmd;
-    if (defined $name && length $name) {
-        my $qname = _sh_single_quote($name);
-        $cmd = "mdfind -name $qname 2>/dev/null";
-    } elsif (defined $ext && length $ext) {
-        my $query = qq{kMDItemFSName == "*.$ext"cd};
-        my $q     = _sh_single_quote($query);
-        $cmd = "mdfind $q 2>/dev/null";
-    } else {
-        # legacy default: find *.torrent
-        my $query = q{kMDItemFSName == "*.torrent"cd};
-        my $q     = _sh_single_quote($query);
-        $cmd = "mdfind $q 2>/dev/null";
-    }
-
-    my @out = `$cmd`;
-    chomp @out;
-
-    # filter: existing, dedup, kind, prune, limit
-    my %seen;
-    my @results = grep { !$seen{$_}++ } grep { defined $_ && length $_ } @out;
-
-    # existence (allow symlinks)
-    @results = grep { -e $_ || -l $_ } @results;
-
-    # kind filter
-    if    ($kind eq 'file') { @results = grep { -f $_ } @results; }
-    elsif ($kind eq 'dir')  { @results = grep { -d $_ } @results; }
-
-    # prune prefixes
-    if (@prune) {
-        @results = grep {
-            my $p = $_; my $ok = 1;
-            for my $bad (@prune) {
-                next unless defined $bad && length $bad;
-                if (index($p, $bad) == 0) { $ok = 0; last }
-            }
-            $ok
-        } @results;
-    }
-
-    # limit if requested
-    if (defined $limit && $limit =~ /^\d+$/ && $limit > 0 && @results > $limit) {
-        @results = @results[0 .. $limit-1];
-    }
-
-    Logger::info("[MAIN] Located " . scalar(@results) . " item(s) via Spotlight");
-    stop_timer("locate_items");
-
-    return wantarray ? @results : \@results;
-}
 
 sub _under_dir {
     my ($path, $root) = @_;
@@ -182,18 +256,9 @@ sub _under_dir {
     return ($P eq $R) || (index($P, "$R/") == 0);
 }
 
-sub _sh_single_quote {
-    my ($s) = @_;
-    $s //= '';
-    $s =~ s/'/'"'"'/g;
-    return "'$s'";
-}
 
-sub normalize_to_arrayref {
-    my $val = shift;
-    return [] unless defined $val;
-    return ref($val) eq 'ARRAY' ? $val : [$val];
-}
+
+
 
 sub parse_chunk_spec {
     my ($spec) = @_;
@@ -202,7 +267,7 @@ sub parse_chunk_spec {
     my ($n) = $spec =~ /(\d+)/;
     die "[chunk] missing or invalid size in '$spec'\n" unless defined $n && $n > 0;
 
-    my $flags = lc($spec =~ s/\d+//r // '');   # strip digits, keep flags
+    my $flags = $spec =~ s/\d+//r // '';   # strip digits, keep flags
     my $has_auto   = ($flags =~ /a/) ? 1 : 0;
     my $has_manual = ($flags =~ /m/) ? 1 : 0;
 
@@ -240,36 +305,42 @@ sub chunk {
 }
 
 sub payload_ok {
+say __LINE__ . " sub payload_ok";
     my ($metadata, $opts) = @_;
     my $files = $metadata->{files} // [];
-    unless (@$files) {
-        return {
-            ok => 0,
-            reason => "no-file-list",
-            details => {
-                missing => [],
-                mismatched => [],
-                zeros => 0,
-                present => 0,
-                total => 0,
-                tested => [],
-            },
-            needs_corroboration => 0,
-        }
-    }
+    return {
+        ok => 0, reason => "no-file-list",
+        details => { missing => [], mismatched => [], zeros => 0, present => 0, total => 0, tested => [] },
+        needs_corroboration => 0,
+    } unless @$files;
 
     my $is_mac = ($^O eq 'darwin');
 
-    # -------- determine multi vs single and preferred lookup key --------
-    # files entries are usually HASH { path, length }, but guard if string
-    my $first_rel =
-        (!@$files)                   ? undef
-      : (ref($files->[0]) eq 'HASH') ? ($files->[0]{path} // '')
-      :                                ($files->[0] // '');
+    # --- normalize entry to a path string (handles hash/array/string forms) ---
+    my $as_path = sub {
+        my ($ent) = @_;
+        if (!defined $ent) { return '' }
+        if (ref($ent) eq 'HASH') {
+            my $p = $ent->{path};
+            if (ref($p) eq 'ARRAY') { return join('/', map { defined($_) ? $_ : '' } @$p) }
+            return defined($p) ? $p : '';
+        } elsif (ref($ent) eq 'ARRAY') {
+            return join('/', map { defined($_) ? $_ : '' } @$ent);
+        } else {
+            return "$ent";
+        }
+    };
 
-    my $is_multi = (@$files > 1) || (defined($first_rel) && $first_rel =~ m{/});
+    # --- classify: single vs multi (slash anywhere OR >1 entries) ---
+    my $first_rel = $as_path->($files->[0]);
+    my $has_slash = 0;
+    for my $f (@$files) {
+        my $p = $as_path->($f);
+        if ($p =~ m{/}) { $has_slash = 1; last }
+    }
+    my $is_multi = (@$files > 1) || $has_slash;
 
-    # torrent "display name"
+    # --- torrent name (top folder target for multi-file) ---
     my $name = $metadata->{name};
     unless (defined $name && length $name) {
         my $p = $first_rel // '';
@@ -277,118 +348,101 @@ sub payload_ok {
     }
     $name //= '';
 
-    # for multi-file, prefer the top folder from the file list, not the display name
-    my $top = undef;
-    if ($is_multi && defined $first_rel) {
-        if ($first_rel =~ m{^([^/]+)/}) { $top = $1; }
-        else { $top = $name; }  # fallback
-    }
+    # Debug: show classification and a few sample paths
+    Logger::debug("\n[classify] name = [$name] files_count = "
+        . scalar(@$files)
+        . " has_slash = $has_slash is_multi = $is_multi");
+    my $sample = join(" | ", map {
+                                my $s=$as_path->($_);
+                                length($s)>80
+                                    ? substr($s,0,77).'...'
+                                    : $s
+                                }
+                                @{[ @$files[0 .. ($#$files < 2
+                                    ? $#$files
+                                    : 2)]
+                                ]});
+    Logger::debug("[classify] sample_paths: $sample");
 
     my (@missing, @mismatched, @tested);
     my ($zeros, $present) = (0, 0);
-
-    # -------- resolve on disk --------
     my $hit_path;
 
     if ($is_mac) {
         if ($is_multi) {
-            # directory-first for multi-file torrents
-            if (defined $top && length $top) {
-                my @dirs = locate_payload_dirs_named($top);
-                Logger::debug("[trace:dir] top-from-files = [ $top ] dir_hits=" . scalar(@dirs));
-                $hit_path = $dirs[0] if @dirs;
-                Logger::info("[PAYLOAD] resolve name = [ $top ] hit_path=" . (defined $hit_path ? $hit_path :
-'(none)'));
-            }
-            # if we didn't find the top folder, skip cleanly (do NOT guess a single file)
+            # ---- MULTI-FILE: directories only (do NOT fall back to files) ----
+            my @dirs = locate_payload_dirs_named($name);
+            Logger::debug("[trace:dir] multi lookup name=[$name] dir_hits=".scalar(@dirs));
+            $hit_path = $dirs[0] if @dirs;
+            Logger::info(__LINE__ . " [PAYLOAD] resolve name = [$name] hit_path=" . (
+                defined $hit_path
+                    ? $hit_path
+                    : '(none)'
+                )
+            );
+
             unless (defined $hit_path && length $hit_path) {
-                Logger::info("[probe] hit_path = (undef)");
-                Logger::info("[probe] exists = 0 is_file = 0 is_dir = 0");
-                Logger::info("[probe] stat_size=(undef)");
-                Logger::info("[probe] tested_name = " . (defined $top ? $top : "(undef)"));
-                Logger::warn("[PAYLOAD] skip reason = missing-files tested = " . (defined $top ? $top : "(undef)"));
+                Logger::warn("[PAYLOAD] skip reason = missing-files tested = " . (length $name ? $name : "(undef)"));
                 return {
                     ok      => 0,
                     reason  => "missing-files",
                     details => {
-                        missing    => [ (defined $top ? $top : $name) ],
+                        missing    => [ (length $name ? $name : "(undef)") ],
                         mismatched => [],
                         zeros      => 0,
                         present    => 0,
                         total      => scalar(@$files),
-                        tested     => [ (defined $top ? $top : $name) ],
+                        tested     => [ (length $name ? $name : "(undef)") ],
                     },
                     needs_corroboration => 0,
                 };
             }
         } else {
-            # single-file: resolve by file name; prefer size when available
-            my $base = $first_rel // $name;       # single-file should be basename already
-            my $expected_size = undef;
-            if (@$files == 1) {
-                if (ref($files->[0]) eq 'HASH') { $expected_size = $files->[0]{length}; }
-            }
+            # ---- SINGLE-FILE: files only ----
+            my $base = (defined($first_rel) && length($first_rel)) ? $first_rel : $name;
+            my $expected_size;
+            if (@$files == 1 && ref($files->[0]) eq 'HASH') { $expected_size = $files->[0]{length}; }
             my ($file_hit) = locate_payload_files_named($base, $expected_size);
             $hit_path = $file_hit if defined $file_hit;
             Logger::info("[PAYLOAD] resolve name = [$base] hit_path=" . (defined $hit_path ? $hit_path : '(none)'));
         }
     }
 
-    # -------- if nothing resolved, skip --------
+    # ---- if nothing resolved, skip ----
     unless (defined $hit_path && length $hit_path) {
-        Logger::info("[probe] hit_path = " . (defined $hit_path ? $hit_path : "(undef)"));
-        Logger::info("[probe] exists = "
-            . (defined $hit_path && -e $hit_path ? 1 : 0)
-            . " is_file=" . (defined $hit_path && -f $hit_path ? 1 : 0)
-            . " is_dir="  . (defined $hit_path && -d $hit_path ? 1 : 0)
-        );
-        my $size_str;
-        if (defined $hit_path) {
-            my @s = stat($hit_path);
-            $size_str = @s ? $s[7] : "stat-failed($!)";
-        } else {
-            $size_str = "(undef)";
-        }
-        Logger::info("[probe] stat_size = $size_str");
-        Logger::info("[probe] tested_name = " . (defined($is_multi ? $top : $name) ? ($is_multi ? $top : $name) :
-"(undef)"));
-        Logger::warn("[PAYLOAD] skip reason = missing-files tested=" . ($is_multi ? ($top // $name) : $name));
+        Logger::warn("[PAYLOAD] skip reason=missing-files tested=$name");
         return {
             ok      => 0,
             reason  => "missing-files",
             details => {
-                missing    => [ $is_multi ? ($top // $name) : $name ],
+                missing    => [ $name ],
                 mismatched => [],
                 zeros      => 0,
                 present    => 0,
                 total      => scalar(@$files),
-                tested     => [ $is_multi ? ($top // $name) : $name ],
+                tested     => [ $name ],
             },
             needs_corroboration => 0,
         };
     }
 
-    # -------- probe what we found; dir → ok; file → size check --------
-    Logger::info("[probe] hit_path = " . (defined $hit_path ? $hit_path : "(undef)"));
-    Logger::info("[probe] exists = "
-        . (-e $hit_path ? 1 : 0)
-        . " is_file=" . (-f $hit_path ? 1 : 0)
-        . " is_dir="  . (-d $hit_path ? 1 : 0)
-    );
-    my $size_str;
-    {
-        my @s = stat($hit_path);
-        $size_str = @s ? $s[7] : "stat-failed($!)";
-    }
-    Logger::info("[probe] stat_size = $size_str");
-    Logger::info("[probe] tested_name = " . ($is_multi ? ($top // $name) : $name));
-
-    my $exists = (-e $hit_path) || (-l $hit_path);
+    # ---- probe resolved path ----
+    my ($exists, $size, $is_dir) = do {
+        return (0, undef, 0) unless -e $hit_path || -l $hit_path;
+        if (-d $hit_path) { (1, undef, 1) }
+        else {
+            my $sz = -s $hit_path; $sz = 0 unless defined $sz;
+            if ($is_mac) {
+                my $out = `mdls -name kMDItemFSSize -raw "$hit_path" 2>/dev/null`; chomp $out;
+                $sz = 0 + $out if defined $out && $out ne '' && $out ne '(null)' && $out =~ /^\d+$/;
+            }
+            (1, $sz, 0)
+        }
+    };
     push @tested, $hit_path;
 
     unless ($exists) {
         push @missing, $hit_path;
-        Logger::warn("[PAYLOAD] skip reason = missing-files tested=" . ($is_multi ? ($top // $name) : $name));
         return {
             ok      => 0,
             reason  => "missing-files",
@@ -404,40 +458,22 @@ sub payload_ok {
         };
     }
 
-    my $is_dir = (-d $hit_path) ? 1 : 0;
-    my $size   = undef;
+    $present++;
 
-    if ($is_dir) {
-        $present++;
-    } else {
-        # file: compute size (mdls on mac if available)
-        my $sz = -s $hit_path; $sz = 0 unless defined $sz;
-        if ($is_mac) {
-            my $out = `mdls -name kMDItemFSSize -raw "$hit_path" 2>/dev/null`; chomp $out;
-            $sz = 0 + $out if defined $out && $out ne '' && $out ne '(null)' && $out =~ /^\d+$/;
-        }
-        $size = $sz;
-        $present++;
-
-        # compare with expected only for single-file torrents
-        my @mm;
-        my $expected = undef;
-        if (@$files == 1 && ref($files->[0]) eq 'HASH') {
-            $expected = $files->[0]{length};
-        }
+    if (!$is_dir) {
+        my $expected = (@$files == 1 && ref($files->[0]) eq 'HASH') ? $files->[0]{length} : undef;
         if (!defined $size) {
-            push @mm, { path => $hit_path, expected => $expected, got => undef };
+            push @mismatched, { path => $hit_path, expected => $expected, got => undef };
         } elsif ($size == 0) {
             $zeros++;
         } elsif (defined $expected && $expected =~ /^\d+$/ && $size != $expected) {
-            push @mm, { path => $hit_path, expected => $expected, got => $size };
+            push @mismatched, { path => $hit_path, expected => $expected, got => $size };
         }
-        @mismatched = @mm if @mm;
     }
 
     Logger::info("[PAYLOAD] ok found_path = $hit_path");
-
     $metadata->{resolved_path} = $hit_path;
+
     return {
         ok      => 1,
         reason  => "ok",
@@ -461,7 +497,7 @@ sub locate_payload_files_named {
     my $mdfind = `command -v mdfind 2>/dev/null`; chomp $mdfind;
     return () unless $mdfind && -x $mdfind;
 
-    Logger::debug("\n[files_named] search name=[$name]");
+    Logger::debug("[files_named] search name=[$name]");
 
     my @hits;
 
@@ -585,8 +621,14 @@ sub locate_payload_dirs_named {
     my $mdfind = `command -v mdfind 2>/dev/null`; chomp $mdfind;
     return () unless $mdfind && -x $mdfind;
 
+    # If the token looks like a filename (has .ext and no slash), skip dir search
+    if ($name !~ m{/} && $name =~ m/\.[^\/.]{1,10}$/) {
+        Logger::debug("[dirs_named] looks-like-file name=[$name] → skip dir search");
+        return ();
+    }
+
     start_timer("find_payload");
-    Logger::debug("#\tlocate_payload_dirs_named");
+    Logger::debug("\n#\tlocate_payload_dirs_named");
 
     my @dirs;
 
@@ -598,24 +640,32 @@ sub locate_payload_dirs_named {
         @dirs = grep { -d $_ } @out;
         if (@dirs) {
             Logger::info("[MAIN] Located " . scalar(@dirs) . " dirs for '$name'");
+            stop_timer("find_payload");
             return @dirs;
+        } else {
+            Logger::debug("[dirs_named] exact-name miss for [$name]");
         }
     }
 
-    # 2) glob by name (directory only) — catches spacing/diacritic variants
+    # 2) glob by name (directory only)
     {
         my $cmd = "mdfind -name " . _shq($name) . " 2>/dev/null";
         my @out = `$cmd`; chomp @out;
         @dirs = grep { -d $_ } @out;
-        Logger::info("[MAIN] Located " . scalar(@dirs) . " dirs for '$name'");
-        return @dirs if @dirs;
+
+        if (@dirs) {
+            Logger::debug("[dirs_named] glob hit: ".scalar(@dirs));
+            Logger::debug("  [dir] $_") for @dirs;
+            Logger::info("[MAIN] Located " . scalar(@dirs) . " dirs for '$name'");
+            stop_timer("find_payload");
+            return @dirs;
+        }
     }
 
     Logger::info("[MAIN] Located 0 dirs for '$name'");
     stop_timer("find_payload");
     return ();
 
-    # local single-quote helper (kept inside the sub)
     sub _shq { my ($s)=@_; $s//= ''; $s =~ s/'/'"'"'/g; return "'$s'"; }
 }
 
@@ -646,30 +696,6 @@ sub _dirname_fast {
     return length($p) ? $p : '/';
 }
 
-sub ensure_temp_ignore_dir {
-    my ($opts) = @_;
-    my $cwd = getcwd();
-    my $dir = File::Spec->catdir($cwd, 'temp_ignore');
-
-    unless (-d $dir) {
-        make_path($dir);
-    }
-
-    # remember explicitly
-    $opts->{temp_ignore_dir} = $dir;
-
-    # normalize & append to export_dir_fin (your “ignored contents” set)
-    my $arr = $opts->{export_dir_fin};
-    if (ref($arr) ne 'ARRAY') {
-        $arr = defined $arr ? [$arr] : [];
-    }
-    # avoid duplicates (string match)
-    my %seen = map { $_ => 1 } @$arr;
-    push @$arr, $dir unless $seen{$dir};
-    $opts->{export_dir_fin} = $arr;
-
-    return $dir;
-}
 
 sub quarantine_torrent {
     my ($torrent_path, $opts, $why) = @_;
@@ -703,86 +729,86 @@ sub quarantine_torrent {
 }
 
 
-# sub pause_between_chunks {
-#     my ($has_auto, $delay_s) = @_;
-#     return unless $has_auto;
-#     $delay_s = 1.5 unless defined $delay_s;  # default breather
-#     select(undef, undef, undef, $delay_s);   # sub-second sleep
-# }
-#
-# sub prompt_between_chunks {
-#     my ($has_manual, $processed) = @_;
-#     return 1 unless $has_manual;             # no prompt -> continue
-#     return 1 if !-t *STDIN;                  # no TTY -> continue
-#     print "[MAIN] Processed $processed. Continue? (y/n) ";
-#     chomp(my $ans = <STDIN>);
-#     return $ans =~ /^y?$/i;                  # Enter or 'y' -> continue
-# }
-#
+sub pause_between_chunks {
+    my ($has_auto, $delay_s) = @_;
+    return unless $has_auto;
+    $delay_s = 1.5 unless defined $delay_s;  # default breather
+    select(undef, undef, undef, $delay_s);   # sub-second sleep
+}
 
-# sub _strip_trailing_slash {
-#     my ($p) = @_;
-#     return undef unless defined $p;
-#     $p =~ s{/+$}{};
-#     return $p;
-# }
+sub prompt_between_chunks {
+    my ($has_manual, $processed) = @_;
+    return 1 unless $has_manual;             # no prompt -> continue
+    return 1 if !-t *STDIN;                  # no TTY -> continue
+    print "[MAIN] Processed $processed. Continue? (y/n) ";
+    chomp(my $ans = <STDIN>);
+    return $ans =~ /^y?$/i;                  # Enter or 'y' -> continue
+}
 
-# sub _common_dir_prefix {
-#     my @paths = @_;
-#     return undef unless @paths;
-#     # Split all into components
-#     my @parts = map { [ grep { length } split m{/+}, $_ ] } @paths;
-#     my $minlen = 0 + (sort { $a <=> $b } map { scalar(@$_) } @parts)[0];
-#
-#     my @common;
-#     for my $i (0 .. $minlen-1) {
-#         my $seg = $parts[0][$i];
-#         last unless defined $seg;
-#         for my $p (@parts[1..$#parts]) {
-#             last unless defined $p->[$i] && $p->[$i] eq $seg;
-#         }
-#         # verify all equal at this depth
-#         my $all_eq = 1;
-#         for my $p (@parts[1..$#parts]) {
-#             if (!defined $p->[$i] || $p->[$i] ne $seg) { $all_eq = 0; last }
-#         }
-#         last unless $all_eq;
-#         push @common, $seg;
-#     }
-#
-#     return undef unless @common;
-#     return '/' . join('/', @common);
-# }
-#
-# sub _join_path {
-#     my ($base, $rel) = @_;
-#     $base //= ''; $rel //= '';
-#     return $rel =~ m{^/} ? $rel : ($base =~ m{/$} ? $base.$rel : "$base/$rel");
-# }
-#
-# sub _probe_file {
-#     my ($path, $is_mac) = @_;
-#     return (0, undef, 0) unless defined $path && length $path;
-#     return (0, undef, 0) unless -e $path || -l $path;
-#     return (1, undef, 1) if -d $path;          # directory present
-#     my $size = -s $path; $size = 0 unless defined $size;
-#     if ($is_mac && -f $path) {
-#         my $out = `mdls -name kMDItemFSSize -raw "$path" 2>/dev/null`; chomp $out;
-#         $size = 0 + $out if defined $out && $out ne '' && $out ne '(null)' && $out =~ /^\d+$/;
-#     }
-#     return (1, $size, 0);
-# }
-#
-# sub _resolve_relative {
-#     my ($rel, $roots) = @_;
-#     return undef unless defined $rel && defined $roots && ref($roots) eq 'ARRAY';
-#     for my $root (@$roots) {
-#         next unless defined $root && length $root;
-#         my $cand = ($root =~ m{/$}) ? ($root . $rel) : ("$root/$rel");
-#         return $cand if -e $cand || -l $cand;
-#     }
-#     return undef;
-# }
+
+sub _strip_trailing_slash {
+    my ($p) = @_;
+    return undef unless defined $p;
+    $p =~ s{/+$}{};
+    return $p;
+}
+
+sub _common_dir_prefix {
+    my @paths = @_;
+    return undef unless @paths;
+    # Split all into components
+    my @parts = map { [ grep { length } split m{/+}, $_ ] } @paths;
+    my $minlen = 0 + (sort { $a <=> $b } map { scalar(@$_) } @parts)[0];
+
+    my @common;
+    for my $i (0 .. $minlen-1) {
+        my $seg = $parts[0][$i];
+        last unless defined $seg;
+        for my $p (@parts[1..$#parts]) {
+            last unless defined $p->[$i] && $p->[$i] eq $seg;
+        }
+        # verify all equal at this depth
+        my $all_eq = 1;
+        for my $p (@parts[1..$#parts]) {
+            if (!defined $p->[$i] || $p->[$i] ne $seg) { $all_eq = 0; last }
+        }
+        last unless $all_eq;
+        push @common, $seg;
+    }
+
+    return undef unless @common;
+    return '/' . join('/', @common);
+}
+
+sub _join_path {
+    my ($base, $rel) = @_;
+    $base //= ''; $rel //= '';
+    return $rel =~ m{^/} ? $rel : ($base =~ m{/$} ? $base.$rel : "$base/$rel");
+}
+
+sub _probe_file {
+    my ($path, $is_mac) = @_;
+    return (0, undef, 0) unless defined $path && length $path;
+    return (0, undef, 0) unless -e $path || -l $path;
+    return (1, undef, 1) if -d $path;          # directory present
+    my $size = -s $path; $size = 0 unless defined $size;
+    if ($is_mac && -f $path) {
+        my $out = `mdls -name kMDItemFSSize -raw "$path" 2>/dev/null`; chomp $out;
+        $size = 0 + $out if defined $out && $out ne '' && $out ne '(null)' && $out =~ /^\d+$/;
+    }
+    return (1, $size, 0);
+}
+
+sub _resolve_relative {
+    my ($rel, $roots) = @_;
+    return undef unless defined $rel && defined $roots && ref($roots) eq 'ARRAY';
+    for my $root (@$roots) {
+        next unless defined $root && length $root;
+        my $cand = ($root =~ m{/$}) ? ($root . $rel) : ("$root/$rel");
+        return $cand if -e $cand || -l $cand;
+    }
+    return undef;
+}
 
 
 
@@ -998,56 +1024,6 @@ sub derive_qbt_context {
     return ($save_path, $category);
 }
 
-sub sanity_check_payload {
-    my ($meta, $save_path, $bucket) = @_;
-    my @issues;
-    my $valid = 1;
-
-    foreach my $file (@{ $meta->{files} }) {
-        my $path = File::Spec->catfile($save_path, $file->{path});
-        if (!-e $path) {
-            push @issues, "missing:$path";
-            $valid = 0;
-            next;
-        }
-
-        my $size_fs = -s $path;
-        my $size_meta = $file->{length};
-
-        if ($size_fs != $size_meta) {
-            # 0-byte allowance
-            if ($size_fs == 0) {
-                push @issues, "zero_byte:$path";
-            } else {
-                push @issues, "size_mismatch:$path ($size_fs != $size_meta)";
-                $valid = 0;
-            }
-        }
-    }
-
-    # Special rule: DUMP bucket completion threshold
-    if ($bucket eq 'dump') {
-        my $total_bytes = $meta->{length};
-        my $have_bytes  = 0;
-        foreach my $file (@{ $meta->{files} }) {
-            my $path = File::Spec->catfile($save_path, $file->{path});
-            $have_bytes += (-e $path ? (-s $path) : 0);
-        }
-        my $completion = $total_bytes ? ($have_bytes / $total_bytes) : 0;
-
-        # 1% per GB rule
-        my $threshold = ($total_bytes / (1024*1024*1024)) * 0.01;
-        if ($completion < $threshold) {
-            push @issues, "below_threshold: " . sprintf("%.2f%% < %.2f%%", $completion*100, $threshold*100);
-            $valid = 0;
-        }
-    }
-
-    return {
-        valid  => $valid,
-        issues => \@issues,
-    };
-}
 
 
 # ---------------------------
@@ -1092,60 +1068,6 @@ sub get_mdls {
     return \%metadata;
 }
 
-# ---------------------------
-# Time and timers
-# ---------------------------
-my %TIMERS;
-
-sub start_timer {
-    my ($label) = @_;
-    $TIMERS{$label} = [gettimeofday];  # store arrayref under label
-    Logger::debug("Starting timer: $label") if defined $label;
-}
-
-sub stop_timer {
-    my ($label) = @_;
-    if (exists $TIMERS{$label}) {
-        my $elapsed = tv_interval($TIMERS{$label});
-        Logger::debug("Stopped timer: $label after ${elapsed}s") if defined $label;
-        delete $TIMERS{$label};
-        return $elapsed;
-    } else {
-        Logger::warn("Timer '$label' not found");
-        return undef;
-    }
-}
-
-sub _str2epoch {
-    my ($str) = @_;
-    return unless $str;
-    my $epoch = eval { POSIX::strftime("%s", localtime(str2time($str))) };
-    return $epoch || 0;
-}
-
-# ---------------------------
-# Output coloring
-# ---------------------------
-
-
-sub detect_dark_mode {
-	Logger::debug("#	detect_dark_mode");
-    my ($os) = @_;
-    $os ||= test_OS();
-
-    if ($os eq "macos") {
-        my $appearance = `defaults read -g AppleInterfaceStyle 2>/dev/null`;
-        chomp $appearance;
-        return $appearance =~ /Dark/i ? 1 : 0;
-    }
-    elsif ($os eq "linux") {
-        # Example: check GTK theme settings (GNOME-based)
-        my $theme = `gsettings get org.gnome.desktop.interface gtk-theme 2>/dev/null`;
-        return $theme =~ /dark/i ? 1 : 0 if $theme;
-    }
-
-    return 0; # default to light mode if unknown
-}
 
 sub load_color_schema {
     my ($dark_mode) = @_;
@@ -1172,5 +1094,5 @@ sub load_color_schema {
         };
     }
 }
-
+=cut
 1;

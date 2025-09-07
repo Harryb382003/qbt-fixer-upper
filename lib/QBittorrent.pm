@@ -1,3 +1,9 @@
+package QBittorrent;
+
+# ----------------------------------------------------------------------
+#       This module for for addressing qBittorrent'a API functions
+# ----------------------------------------------------------------------
+
 use common::sense;
 use Data::Dumper;
 use File::Basename;
@@ -5,32 +11,15 @@ use File::Slurp;
 use JSON;
 use Time::Piece;
 use File::Spec;
-
-use lib 'lib';
-use Logger;
-
-
-package QBittorrent;
-
-use strict;
-use warnings;
 use LWP::UserAgent;
 use HTTP::Cookies;
-use JSON;
-
 
 use lib 'lib/';
 use Logger;
 use Utils qw(
     start_timer
     stop_timer
-    payload_ok
-    derive_save_path
-    chunk
-    parse_chunk_spec
-    prompt_between_chunks
-    pause_between_chunks
-    sprinkle);
+    );
 
 
 sub new {
@@ -74,7 +63,6 @@ sub get_preferences {
     return decode_json($res->decoded_content);
 }
 
-
 sub get_torrents_infohash {
 	Logger::debug("#	get_torrents");
     start_timer("qBittorrent connect");
@@ -90,6 +78,117 @@ sub get_torrents_infohash {
     stop_timer("qBittorrent connect");
     return \%hash;
 }
+
+sub import_from_parsed {
+    Logger::debug("# --- IMPORTING PARSED METADATA --- #");
+    my ($self, $parsed, $opts) = @_;
+
+    my $by_infohash = $parsed->{by_infohash} || {};
+    my @pending;
+
+    for my $infohash (sort keys %$by_infohash) {
+        my $metadata = $by_infohash->{$infohash} || next;
+
+        # require: source_path, files arrayref, and at least one entry with a path
+        next unless $metadata->{source_path}
+                 && ref($metadata->{files}) eq 'ARRAY'
+                 && @{ $metadata->{files} }
+                 && defined($metadata->{files}[0]{path})
+                 && length($metadata->{files}[0]{path});
+
+        push @pending, {
+            infohash      => $infohash,
+            name          => ($metadata->{name} // '(unnamed)'),
+            source_path   => $metadata->{source_path},     # absolute .torrent path
+            files         => $metadata->{files},           # [{ path, length }, ...]
+            bucket        => $metadata->{bucket},
+            resolved_path => $metadata->{resolved_path},   # may be undef
+        };
+    }
+
+    return wantarray ? @pending : \@pending;
+}
+
+
+
+#
+#     # --- prune runtime queue: never process quarantined torrents ---
+#     my $before = scalar @pending;
+#     @pending = grep { (($_->{bucket} // '') ne 'temp_ignore') } @pending;
+#     my $removed = $before - scalar @pending;
+#     if ($removed > 0) {
+#         Logger::info(sprintf(
+#             "[TEMP] pruned %d quarantined torrent(s) from pending queue", $removed
+#         ));
+#     };
+
+
+=pod
+#
+#     # Chunk pacing: --chunk N[a|m], optional --delay
+#     my ($chunk_size, $auto_continue, $manual_prompt) =
+#         parse_chunk_spec($opts->{chunk});
+#
+#     my $torrents_processed = 0;
+#
+#     # Ensure session (repo currently exposes _login)
+#     $self->_login();
+#
+#     while (@pending) {
+#         my $torrent_batch = chunk(\@pending, $chunk_size);   # NOTE:  chunk() is destructive
+#
+#         for my $entry (@$torrent_batch) {
+#             my $payload_check = payload_ok($entry, $opts);
+#             unless ($payload_check->{ok}) {
+#                 my $miss = $payload_check->{details}{missing} // [];
+#                 my $why  = $payload_check->{reason} // 'unknown';
+#
+#                 Logger::warn(
+#                     "[SKIP] $entry->{name} ($entry->{infohash}) "
+#                     . "reason=$why "
+#                     . "missing_count=" . scalar(@$miss)
+#                 );
+#
+#                 # move the .torrent to temp_ignore so it stops resurfacing
+#                 Utils::quarantine_torrent($entry->{source_path}, $opts, $why);
+#
+#                 next;
+#             }
+#
+#             Logger::warn("[CORRO] zero-byte placeholder(s) found in $entry->{name}")
+#                 if $payload_check->{needs_corroboration};
+#
+#             my $save_path = derive_save_path($entry, $opts);
+#
+#             if ($opts->{dry} || $opts->{dev_mode}) {
+#                 Logger::info("[DRY] add: $entry->{source_path} -> " . ($save_path // '(qbt default)'));
+#             } else {
+#                 my $ok = $self->add_torrent($entry->{source_path}, $save_path);
+#                 if ($ok) {
+#                     Logger::summary("[ADDED] $entry->{source_path}");
+#                 } else {
+#                     Logger::summary("[FAILED] add $entry->{source_path}");
+#                 }
+#             }
+#             $torrents_processed++;
+#         }
+#
+#         # default behavior (no flags): single chunk then exit
+#         last if (!$auto_continue && !$manual_prompt);
+#
+#         # manual prompt between chunks
+#         if ($manual_prompt) {
+#             last unless prompt_between_chunks(1, $torrents_processed);
+#         }
+#
+#         # auto delay between chunks
+#         pause_between_chunks($auto_continue, $opts->{delay});
+#     }
+#
+#     return 1;
+}
+
+
 
 
 sub get_torrent_files {
@@ -111,116 +210,6 @@ sub get_torrent_files {
     return $files;
 }
 
-
-sub import_from_parsed {
-    my ($self, $parsed, $opts) = @_;
-
-    my $by_infohash = $parsed->{by_infohash} || {};
-    my @pending;
-
-    # Build pending list directly from parsed data
-    for my $infohash (sort keys %$by_infohash) {
-        my $metadata = $by_infohash->{$infohash} || next;
-
-        next unless $metadata->{source_path}
-                 && ref($metadata->{files}) eq 'ARRAY'
-                 && @{ $metadata->{files} };
-
-        # sanitize file entries: handle both hashrefs and plain strings
-        my @files_sanitized = map {
-            if (ref($_) eq 'HASH') {
-                my $p = $_->{path}   // $_->{abs}   // $_->{file} // $_->{name};
-                my $l = $_->{length} // $_->{size}  // undef;
-                { path => $p, length => $l }
-            } else {
-                # plain string filename
-                { path => $_, length => undef }
-            }
-        } @{ $metadata->{files} };
-
-        next unless @files_sanitized && defined $files_sanitized[0]{path};
-
-        push @pending, {
-            infohash    => $infohash,
-            name        => ($metadata->{name} // '(unnamed)'),
-            source_path => $metadata->{source_path},    # absolute path to .torrent
-            files       => \@files_sanitized,
-            bucket      => $metadata->{bucket},         # optional, useful for logs
-        };
-    }
-    return 1 unless @pending; # nothing to do
-    # --- prune runtime queue: never process quarantined torrents ---
-    my $before = scalar @pending;
-    @pending = grep { (($_->{bucket} // '') ne 'temp_ignore') } @pending;
-    my $removed = $before - scalar @pending;
-    if ($removed > 0) {
-        Logger::info(sprintf(
-            "[TEMP] pruned %d quarantined torrent(s) from pending queue", $removed
-        ));
-    };
-    # Chunk pacing: --chunk N[a|m], optional --delay
-    my ($chunk_size, $auto_continue, $manual_prompt) =
-        parse_chunk_spec($opts->{chunk});
-
-    my $torrents_processed = 0;
-
-    # Ensure session (repo currently exposes _login)
-    $self->_login();
-
-    while (@pending) {
-        my $torrent_batch = chunk(\@pending, $chunk_size);   # NOTE: your chunk() is destructive
-
-        for my $entry (@$torrent_batch) {
-    my $payload_check = payload_ok($entry, $opts);
-unless ($payload_check->{ok}) {
-    my $miss = $payload_check->{details}{missing} // [];
-    my $why  = $payload_check->{reason} // 'unknown';
-
-    Logger::warn(
-        "[SKIP] $entry->{name} ($entry->{infohash}) "
-        . "reason=$why "
-        . "missing_count=" . scalar(@$miss)
-    );
-
-    # move the .torrent to temp_ignore so it stops resurfacing
-    Utils::quarantine_torrent($entry->{source_path}, $opts, $why);
-
-    next;
-}
-
-    Logger::warn("[CORRO] zero-byte placeholder(s) found in $entry->{name}")
-        if $payload_check->{needs_corroboration};
-
-    my $save_path = derive_save_path($entry, $opts);
-
-    if ($opts->{dry} || $opts->{dev_mode}) {
-        Logger::info("[DRY] add: $entry->{source_path} -> " . ($save_path // '(qbt default)'));
-    } else {
-        my $ok = $self->add_torrent($entry->{source_path}, $save_path);
-        if ($ok) {
-            Logger::summary("[ADDED] $entry->{source_path}");
-        } else {
-            Logger::summary("[FAILED] add $entry->{source_path}");
-        }
-    }
-
-    $torrents_processed++;
-}
-
-        # default behavior (no flags): single chunk then exit
-        last if (!$auto_continue && !$manual_prompt);
-
-        # manual prompt between chunks
-        if ($manual_prompt) {
-            last unless prompt_between_chunks(1, $torrents_processed);
-        }
-
-        # auto delay between chunks
-        pause_between_chunks($auto_continue, $opts->{delay});
-    }
-
-    return 1;
-}
 
 sub add_torrent {
     my ($self, $torrent_path, $save_path, $category) = @_;
@@ -312,7 +301,6 @@ sub get_free_space {
     return 500 * 1024 * 1024 * 1024; # pretend 500 GB free
 }
 
-=pod
 
 sub get_q_zombies {
 	Logger::debug("#	get_q_zombies");

@@ -16,15 +16,20 @@ use Exporter 'import';
 
 use lib 'lib/';
 use Logger;
-use Utils qw(start_timer stop_timer sprinkle);
+use Utils qw(
+    start_timer
+    stop_timer
+    );
 
 
 our @EXPORT_OK = qw(
+    locate_torrents
     extract_metadata
     match_by_date
     process_all_infohashes
     normalize_filename
     report_collision_groups
+    import_from_parsed
 
 );
 
@@ -55,7 +60,114 @@ sub new {
     return $self;
 }
 
+sub locate_torrents {
+    my ($opts) = @_;
+    $opts ||= {};
+
+    # Build prune roots from your existing ignore set (export_dir_fin)
+    my @prune;
+    if (ref $opts->{export_dir_fin} eq 'ARRAY') {
+        push @prune, @{ $opts->{export_dir_fin} };
+    } elsif ($opts->{export_dir_fin}) {
+        push @prune, $opts->{export_dir_fin};
+    }
+
+    my $paths = locate_items({
+        ext   => 'torrent',
+        kind  => 'file',
+        prune => \@prune,
+    });
+
+    return wantarray ? @$paths : $paths;
+}
+
+
+sub locate_items {
+    my ($args) = @_;
+    $args ||= {};
+
+    Logger::debug("#\tlocate_items");
+    start_timer("locate_items");
+
+    # Check Spotlight availability
+    my $mdfind_path = `command -v mdfind 2>/dev/null`;
+    chomp $mdfind_path;
+    my $has_mdfind = ($mdfind_path && -x $mdfind_path) ? 1 : 0;
+
+    unless ($has_mdfind) {
+        # no code has been written to use File::Find or any other backend
+        # this is a placeholder for future Linux/BSD compatibility
+        Logger::error("[Utils] mdfind not available; File::Find fallback not yet implemented");
+        stop_timer("locate_items");
+        return wantarray ? () : [];
+    }
+
+    my $kind  = lc($args->{kind} // 'any');
+    my $name  = $args->{name};
+    my $ext   = $args->{ext};
+    my $limit = $args->{limit};
+    my @prune = @{ $args->{prune} // [] };
+
+    # Build a single string command with proper quoting.
+    my $cmd;
+    if (defined $name && length $name) {
+        my $qname = _sh_single_quote($name);
+        $cmd = "mdfind -name $qname 2>/dev/null";
+    } elsif (defined $ext && length $ext) {
+        my $query = qq{kMDItemFSName == "*.$ext"cd};
+        my $q     = _sh_single_quote($query);
+        $cmd = "mdfind $q 2>/dev/null";
+    } else {
+        # legacy default: find *.torrent
+        my $query = q{kMDItemFSName == "*.torrent"cd};
+        my $q     = _sh_single_quote($query);
+        $cmd = "mdfind $q 2>/dev/null";
+    }
+
+    my @out = `$cmd`;
+    chomp @out;
+
+    # filter: existing, dedup, kind, prune, limit
+    my %seen;
+    my @results = grep { !$seen{$_}++ } grep { defined $_ && length $_ } @out;
+
+    # existence (allow symlinks)
+    @results = grep { -e $_ || -l $_ } @results;
+
+    # kind filter
+    if    ($kind eq 'file') { @results = grep { -f $_ } @results; }
+    elsif ($kind eq 'dir')  { @results = grep { -d $_ } @results; }
+
+    # prune prefixes
+    if (@prune) {
+        @results = grep {
+            my $p = $_; my $ok = 1;
+            for my $bad (@prune) {
+                next unless defined $bad && length $bad;
+                if (index($p, $bad) == 0) { $ok = 0; last }
+            }
+            $ok
+        } @results;
+    }
+
+    # limit if requested
+    if (defined $limit && $limit =~ /^\d+$/ && $limit > 0 && @results > $limit) {
+        @results = @results[0 .. $limit-1];
+    }
+
+    Logger::info("[MAIN] Located " . scalar(@results) . " item(s) via Spotlight");
+    stop_timer("locate_items");
+
+    return wantarray ? @results : \@results;
+}
+
+
+
+
+
+
 sub extract_metadata {
+Logger::debug("# --- EXTRACTING METADATA --- #");
     my ($self, $qbt) = @_;
     my $opts  = $self->{opts};
     my @files = @{ $self->{all_torrents} };
@@ -71,7 +183,7 @@ sub extract_metadata {
     my $collision_count  = 0;
 
     my (%metadata,$metadata);
-Logger::info("Primed \%seen with ".scalar(keys %seen)." qbt infohashes");
+    Logger::info("Primed \\%seen with ".scalar(keys %seen)." qbt infohashes");
 
     foreach my $file_path (@files) {
         Logger::trace("[TorrentParser] Processing $file_path");
@@ -95,8 +207,35 @@ Logger::info("Primed \%seen with ".scalar(keys %seen)." qbt infohashes");
         };
 
         # --- Compute infohash ---
-        my $infohash = sha1_hex(Bencode::bencode($info->{info}));
+        my $infohash     = sha1_hex(Bencode::bencode($info->{info}));
         my $torrent_name = $info->{info}{name} // basename($file_path);
+
+        # --- Normalize file list to [{path, length}] ---
+        my @files_norm;
+        if ($info->{files} && ref($info->{files}) eq 'ARRAY') {
+            for my $f (@{ $info->{files} }) {
+                next unless ref($f) eq 'HASH';
+                my $p = $f->{path};
+                my $path_str =
+                    ref($p) eq 'ARRAY' ? join('/', map { defined($_) ? $_ : '' } @$p)
+                  : defined($p)        ? $p
+                  :                      '';
+                next unless length $path_str;
+                push @files_norm, { path => $path_str, length => ($f->{length} // 0) };
+            }
+        } else {
+            # single-file torrent
+            push @files_norm, { path => $torrent_name, length => ($info->{length} // 0) };
+        }
+
+        # If we somehow have nothing usable, skip early
+        unless (@files_norm) {
+            Logger::warn("[TorrentParser] No usable file entries in $file_path");
+            next;
+        }
+
+        my $total_size = 0;
+        $total_size += ($_->{length} || 0) for @files_norm;
 
         # --- Bucket assignment ---
         my $bucket = _assign_bucket($file_path, $opts);
@@ -105,12 +244,8 @@ Logger::info("Primed \%seen with ".scalar(keys %seen)." qbt infohashes");
         $metadata = {
             infohash    => $infohash,
             name        => $torrent_name,
-            files       => $info->{files}
-                             ? [ map { $_->{path} } @{ $info->{files} } ]
-                             : [ $torrent_name ],
-            total_size  => $info->{files}
-                             ? sum(map { $_->{length} || 0 } @{ $info->{files} })
-                             : $info->{length} || 0,
+            files       => \@files_norm,     # << unified shape
+            total_size  => $total_size,
             source_path => $file_path,
             bucket      => $bucket,
             private     => $info->{private} ? 'Yes' : 'No',
@@ -118,8 +253,8 @@ Logger::info("Primed \%seen with ".scalar(keys %seen)." qbt infohashes");
             comment     => $info->{comment}  // '',
         };
 
-        # --- TODO: translation hook ---
-        if (my $translation = $opts->{translation}) {   # e.g. supplied externally
+        # --- Optional translation hook ---
+        if (my $translation = $opts->{translation}) {
             if ($metadata->{comment}) {
                 $metadata->{comment} .= "\nEN: $translation";
             } else {
@@ -134,7 +269,7 @@ Logger::info("Primed \%seen with ".scalar(keys %seen)." qbt infohashes");
             next;
         }
 
-        # --- Collision case study (grouped by bucket) ---
+        # --- Collision grouping (by bucket) ---
         $bucket_groups{$bucket}{$torrent_name . ".torrent"} //= [];
         push @{ $bucket_groups{$bucket}{$torrent_name . ".torrent"} }, $metadata;
 
@@ -164,6 +299,7 @@ Logger::info("Primed \%seen with ".scalar(keys %seen)." qbt infohashes");
     };
 }
 
+
 sub report_collision_groups {
     my ($bucket_groups) = @_;
     my $collision_groups = 0;
@@ -183,6 +319,7 @@ sub report_collision_groups {
 
     Logger::summary(" Filename collision groups observed:\t$collision_groups");
 }
+
 
 sub normalize_filename {
     my ($l_parsed, $opts, $stats) = @_;
@@ -227,6 +364,217 @@ sub normalize_filename {
     }
 
     return;
+}
+
+sub process_all_infohashes {
+Logger::debug("# --- PROCESSING ALL INFOHASHES --- #");
+    my ($parsed, $opts) = @_;
+    Logger::info("\n[MAIN] Starting process_all_infohashes()");
+
+    Logger::info("Parsed keys: " . join(", ", keys %$parsed));
+    my $infohashes = $parsed->{by_infohash};
+    my $count = scalar keys %$infohashes;
+    Logger::info("[MAIN] Found $count unique torrents to process");
+
+    foreach my $infohash (sort keys %$infohashes) {
+        my $meta = $infohashes->{$infohash};
+
+#         Logger::info(__LINE__ . " [INFOHASH] Processing $infohash "
+#             . "($meta->{bucket}), $meta->{name}");
+
+        # --- Step 1: Verify source .torrent file still exists ---
+        unless (-f $meta->{source_path}) {
+            Logger::warn(__LINE__ . "[INFOHASH:$infohash] Missing source file: $meta->{source_path}");
+            next;
+        }
+
+        # --- Step 2: Payload sanity checks (Utils::sanity_check_payload) ---
+        my $payload_ok = Utils::sanity_check_payload($meta);
+        unless ($payload_ok) {
+            Logger::warn(__LINE__ . "[INFOHASH:$infohash] Payload sanity check failed, skipping");
+            next;
+        }
+
+#         # --- Step 3: Decide save_path ---
+#         my $save_path = Utils::determine_save_path($meta, $opts);
+#         Logger::debug("[INFOHASH:$infohash] save_path = "
+#             . (defined $save_path ? $save_path : "(qBittorrent default)"));
+#
+#         # --- Step 4: Call qBittorrent API (stub for now) ---
+#         Logger::info("[INFOHASH:$infohash] Would call QBT add_torrent: "
+#             . "source=$meta->{source_path}, save_path="
+#             . (defined $save_path ? $save_path : "QBT-default")
+#             . ", category=" . ($meta->{bucket} // "(none)"));
+#
+#         # TODO: $qb->add_torrent($meta->{source_path}, $save_path, $meta->{bucket});
+    }
+
+    Logger::info("[MAIN] Finished process_all_infohashes()");
+}
+
+
+
+
+
+sub q_add_queue { Logger::debug("BUILDING QUEUE FOR ADDING TORRENTS");
+    my ($l_parsed, $opts) = @_;
+    my @queue = $l_parsed->{by_infohash}
+}
+
+
+
+
+
+
+
+=pod
+
+
+
+
+
+
+
+
+
+
+
+
+
+sub _collision_handler {
+    my ($meta, $opts, $colliders) = @_;
+    return if !$opts->{normalize};   # 🚫 skip silently if switch is off
+
+    my $bucket = $meta->{bucket};
+    my $path   = $meta->{source_path};
+    my $base   = basename($path);
+
+    # init counters once
+    $colliders->{case_study} //= {
+        authoritative_safe      => 0,
+        kitchen_sink_safe       => 0,
+        kitchen_sink_normalized => 0,
+        kitchen_sink_manual     => 0,
+        kitchen_sink_missing    => 0,
+    };
+
+    # --- Authoritative buckets (qBittorrent managed) ---
+    if ($bucket ne 'kitchen_sink') {
+        Logger::summary("[NORMALIZE] Authoritative bucket ($bucket) -> safe: $base");
+        $colliders->{case_study}{authoritative_safe}++;
+        return "authoritative_safe";
+    }
+
+    # --- Kitchen sink collisions ---
+    if (-e $path) {
+        my $normalized = Utils::normalize_filename($meta, $colliders);
+
+        if ($normalized ne $path) {
+            if (-e $normalized) {
+                Logger::summary("[NORMALIZE] KS collision escalation failed (target exists) -> manual: $normalized");
+                push @{ $colliders->{manual} }, $path;
+                $colliders->{case_study}{kitchen_sink_manual}++;
+                return "kitchen_sink_manual";
+            }
+            Logger::summary("[NORMALIZE] KS collision normalized: $base -> $normalized");
+            $colliders->{case_study}{kitchen_sink_normalized}++;
+            return "kitchen_sink_normalized";
+        }
+        else {
+            Logger::summary("[NORMALIZE] KS no collision, safe: $base");
+            $colliders->{case_study}{kitchen_sink_safe}++;
+            return "kitchen_sink_safe";
+        }
+    }
+
+    Logger::summary("[NORMALIZE] KS missing source file -> ignored: $base");
+    $colliders->{case_study}{kitchen_sink_missing}++;
+    return "kitchen_sink_missing";
+}
+
+
+
+
+
+# ==========================
+# Bucket processing
+# ==========================
+
+# sub process_all_buckets {
+#     my ($parsed, $opts) = @_;
+#
+#     # Only buckets, skip by_infohash
+#     my $buckets = $parsed->{by_bucket};
+#
+#     foreach my $bucket (keys %$buckets) {
+#         my $bucket_data = $buckets->{$bucket};
+#         my $count       = scalar keys %$bucket_data;
+#
+#         Logger::info("\n[BUCKET] Processing '$bucket' with $count torrents");
+#
+#         _process_bucket($bucket, $bucket_data, $opts);
+#     }
+# }
+
+
+
+# sub _process_bucket {
+#     my ($bucket, $bucket_data, $opts) = @_;
+#
+#     # dev_mode controls chunking
+#     my $dev_mode = $opts->{dev_mode};
+#     my $chunk    = $dev_mode ? 5 : scalar keys %$bucket_data;
+#
+#     my @files = keys %$bucket_data;
+#     my $count = 0;
+#
+#     while (@files) {
+#         my @batch = splice(@files, 0, $chunk);
+#
+#         foreach my $file_path (@batch) {
+#             Logger::info("194[BUCKET:$bucket] Would load into API: $file_path");
+#             # TODO: replace this stub with actual add_torrent call later
+#         }
+#
+#         Logger::info("[198 BUCKET:$bucket] Completed batch of " . scalar(@batch));
+#         last if $dev_mode;  # stop after first batch if dev_mode enabled
+#     }
+# }
+
+=cut
+# ---------------------------
+#       internal helpers
+# ---------------------------
+
+sub _assign_bucket {
+    my ($path, $opts) = @_;
+
+    # Check against each configured export_dir_fin
+    for my $cdir (@{ $opts->{export_dir_fin} }) {
+        if (index($path, $cdir) != -1) {
+            return basename($cdir);  # dynamic bucket name
+        }
+    }
+
+    # Check against each configured export_dir
+    for my $ddir (@{ $opts->{export_dir} }) {
+        if (index($path, $ddir) != -1) {
+            return basename($ddir);  # dynamic bucket name
+        }
+    }
+
+    # BT_backup (hardcoded, qBittorrent internal)
+    return 'BT_backup' if $path =~ /BT_backup/;
+
+    # Default fallback
+    return 'kitchen_sink';
+}
+
+sub _sh_single_quote {
+    my ($s) = @_;
+    $s //= '';
+    $s =~ s/'/'"'"'/g;
+    return "'$s'";
 }
 
 sub _normalize_single {
@@ -334,184 +682,5 @@ sub _shorten_tracker {
 
     return uc $short;  # always uppercase for consistency
 }
-
-
-sub process_all_infohashes {
-    my ($parsed, $opts) = @_;
-    Logger::info("\n[MAIN] Starting process_all_infohashes()");
-
-    Logger::info("Parsed keys: " . join(", ", keys %$parsed));
-    my $infohashes = $parsed->{by_infohash};
-    my $count = scalar keys %$infohashes;
-    Logger::info("[MAIN] Found $count unique torrents to process");
-
-    foreach my $infohash (sort keys %$infohashes) {
-        my $meta = $infohashes->{$infohash};
-
-#         Logger::info(__LINE__ . " [INFOHASH] Processing $infohash "
-#             . "($meta->{bucket}), $meta->{name}");
-
-        # --- Step 1: Verify source .torrent file still exists ---
-        unless (-f $meta->{source_path}) {
-            Logger::warn(__LINE__ . "[INFOHASH:$infohash] Missing source file: $meta->{source_path}");
-            next;
-        }
-
-        # --- Step 2: Payload sanity checks (Utils::sanity_check_payload) ---
-        my $payload_ok = Utils::sanity_check_payload($meta);
-        unless ($payload_ok) {
-            Logger::warn(__LINE__ . "[INFOHASH:$infohash] Payload sanity check failed, skipping");
-            next;
-        }
-
-#         # --- Step 3: Decide save_path ---
-#         my $save_path = Utils::determine_save_path($meta, $opts);
-#         Logger::debug("[INFOHASH:$infohash] save_path = "
-#             . (defined $save_path ? $save_path : "(qBittorrent default)"));
-#
-#         # --- Step 4: Call qBittorrent API (stub for now) ---
-#         Logger::info("[INFOHASH:$infohash] Would call QBT add_torrent: "
-#             . "source=$meta->{source_path}, save_path="
-#             . (defined $save_path ? $save_path : "QBT-default")
-#             . ", category=" . ($meta->{bucket} // "(none)"));
-#
-#         # TODO: $qb->add_torrent($meta->{source_path}, $save_path, $meta->{bucket});
-    }
-
-    Logger::info("[MAIN] Finished process_all_infohashes()");
-}
-
-# --- internal helpers ---
-sub _assign_bucket {
-    my ($path, $opts) = @_;
-
-    # Check against each configured export_dir_fin
-    for my $cdir (@{ $opts->{export_dir_fin} }) {
-        if (index($path, $cdir) != -1) {
-            return basename($cdir);  # dynamic bucket name
-        }
-    }
-
-    # Check against each configured export_dir
-    for my $ddir (@{ $opts->{export_dir} }) {
-        if (index($path, $ddir) != -1) {
-            return basename($ddir);  # dynamic bucket name
-        }
-    }
-
-    # BT_backup (hardcoded, qBittorrent internal)
-    return 'BT_backup' if $path =~ /BT_backup/;
-
-    # Default fallback
-    return 'kitchen_sink';
-}
-
-
-
-=pod
-
-
-sub _collision_handler {
-    my ($meta, $opts, $colliders) = @_;
-    return if !$opts->{normalize};   # 🚫 skip silently if switch is off
-
-    my $bucket = $meta->{bucket};
-    my $path   = $meta->{source_path};
-    my $base   = basename($path);
-
-    # init counters once
-    $colliders->{case_study} //= {
-        authoritative_safe      => 0,
-        kitchen_sink_safe       => 0,
-        kitchen_sink_normalized => 0,
-        kitchen_sink_manual     => 0,
-        kitchen_sink_missing    => 0,
-    };
-
-    # --- Authoritative buckets (qBittorrent managed) ---
-    if ($bucket ne 'kitchen_sink') {
-        Logger::summary("[NORMALIZE] Authoritative bucket ($bucket) -> safe: $base");
-        $colliders->{case_study}{authoritative_safe}++;
-        return "authoritative_safe";
-    }
-
-    # --- Kitchen sink collisions ---
-    if (-e $path) {
-        my $normalized = Utils::normalize_filename($meta, $colliders);
-
-        if ($normalized ne $path) {
-            if (-e $normalized) {
-                Logger::summary("[NORMALIZE] KS collision escalation failed (target exists) -> manual: $normalized");
-                push @{ $colliders->{manual} }, $path;
-                $colliders->{case_study}{kitchen_sink_manual}++;
-                return "kitchen_sink_manual";
-            }
-            Logger::summary("[NORMALIZE] KS collision normalized: $base -> $normalized");
-            $colliders->{case_study}{kitchen_sink_normalized}++;
-            return "kitchen_sink_normalized";
-        }
-        else {
-            Logger::summary("[NORMALIZE] KS no collision, safe: $base");
-            $colliders->{case_study}{kitchen_sink_safe}++;
-            return "kitchen_sink_safe";
-        }
-    }
-
-    Logger::summary("[NORMALIZE] KS missing source file -> ignored: $base");
-    $colliders->{case_study}{kitchen_sink_missing}++;
-    return "kitchen_sink_missing";
-}
-
-
-
-
-
-# ==========================
-# Bucket processing
-# ==========================
-
-# sub process_all_buckets {
-#     my ($parsed, $opts) = @_;
-#
-#     # Only buckets, skip by_infohash
-#     my $buckets = $parsed->{by_bucket};
-#
-#     foreach my $bucket (keys %$buckets) {
-#         my $bucket_data = $buckets->{$bucket};
-#         my $count       = scalar keys %$bucket_data;
-#
-#         Logger::info("\n[BUCKET] Processing '$bucket' with $count torrents");
-#
-#         _process_bucket($bucket, $bucket_data, $opts);
-#     }
-# }
-
-
-
-# sub _process_bucket {
-#     my ($bucket, $bucket_data, $opts) = @_;
-#
-#     # dev_mode controls chunking
-#     my $dev_mode = $opts->{dev_mode};
-#     my $chunk    = $dev_mode ? 5 : scalar keys %$bucket_data;
-#
-#     my @files = keys %$bucket_data;
-#     my $count = 0;
-#
-#     while (@files) {
-#         my @batch = splice(@files, 0, $chunk);
-#
-#         foreach my $file_path (@batch) {
-#             Logger::info("194[BUCKET:$bucket] Would load into API: $file_path");
-#             # TODO: replace this stub with actual add_torrent call later
-#         }
-#
-#         Logger::info("[198 BUCKET:$bucket] Completed batch of " . scalar(@batch));
-#         last if $dev_mode;  # stop after first batch if dev_mode enabled
-#     }
-# }
-
-=cut
-
 
 1;

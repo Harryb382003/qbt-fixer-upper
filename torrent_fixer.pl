@@ -15,6 +15,7 @@ use String::ShellQuote;
 use lib 'lib';
 use QBittorrent;
 use TorrentParser qw(
+              locate_torrents
               extract_metadata
               process_all_infohashes
               normalize_filename
@@ -23,9 +24,8 @@ use TorrentParser qw(
 use ZombieManager;
 use Utils qw(
             locate_items
-            locate_torrents
+            ensure_temp_ignore_dir
             normalize_to_arrayref
-            sprinkle
             );
 use Logger;
 #use DevTools;
@@ -34,9 +34,9 @@ sub usage {
   print <<"EOF";
 sage: $0 [options]
 Options:
+  --repair              Adds torrents with a verified payload only
   --normalize           normalize torrent name to *.torrent's authoritative name
-  --dev-mode            is effectively just a safety wrapper around any code that would change something in qBittorrent
-or on disk.
+  --dev-mode            extra reporting
   --chunk n             process in chunks of n
   --dump-lines=i        First 5 lines of the Dumper output, unless --full-dump is passed
   --invert-colors       Invert day/night mode
@@ -56,6 +56,7 @@ my $cfg      = -e $cfg_file ? decode_json(read_file($cfg_file)) : {};
 # --- Options ---
 my %opts;
 GetOptions(
+           "repair"         => \$opts{repair},
            "dev-mode"       => \$opts{dev_mode},
            "chunk=i"        => \$opts{chunk},
            "invert-colors"  => \$opts{invert_colors},
@@ -95,15 +96,13 @@ if (exists $opts{normalize}) {
     my $mode = $opts{normalize};
 
     $opts{normalize_mode} = 0;   # default: off
-    $opts{dry_run}        = 0;   # default: no dry-run
 
     if ($mode =~ /^([ac])([d]?)$/i) {
         $opts{normalize_mode} = $1;
-        $opts{dry_run}        = 1 if $2;
     }
     elsif ($mode eq '0') {
         $opts{normalize_mode} = 0;        # explicit off
-        Logger::info("Normalization disabled (--normalize=0)");
+        Logger::info("Normalization disabled (--normalize = 0)");
     }
     else {
         die "Invalid --normalize value: $mode\n"
@@ -112,7 +111,7 @@ if (exists $opts{normalize}) {
 }
 
 # --- Setup ---# after parsing CLI into %opts
-Logger::info("[MAIN] verbose=$opts{verbose}//undef");
+Logger::info("[MAIN] verbose=$opts{verbose}");
 Logger::init(\%opts);
 Logger::debug("[MAIN] debug is ON (probe)");   # should appear if debug works
 Logger::info("Logger initialized");
@@ -130,7 +129,7 @@ my @all_t = locate_torrents(\%opts);
 
 Logger::info("FileLocator complete, passing to TorrentParser");
 Logger::summary("Torrent files located\t\t" . scalar(@all_t) );
-Utils::ensure_temp_ignore_dir(\%opts);   # creates ./temp_ignore and flags it as ignore
+ensure_temp_ignore_dir(\%opts);   # creates ./temp_ignore and flags it as ignore
 
 # --- Load QBittorrent ---
 # This is always a fresh start.
@@ -173,9 +172,26 @@ if ($opts{normalize_mode}) {
     normalize_filename($l_parsed, \%opts);
 }
 
+# --- QBT add queue ---
+
+# Authoritative working queue: $l_parsed->{pending_add} (arrayref).
+# Use this for your destructive chunk() loop.
+# It keeps main lean and blazing simple.
+
+
+
+
+
+
+
+
 
 Logger::info("\nStarting to add torrents...");
-$qb->import_from_parsed($l_parsed, \%opts);
+my @pending = $qb->import_from_parsed($l_parsed, \%opts);
+
+
+
+
 
 process_all_infohashes($l_parsed, \%opts);
 
